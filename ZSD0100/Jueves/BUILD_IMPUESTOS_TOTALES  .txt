@@ -1,0 +1,75 @@
+METHOD build_impuestos_totales.
+  "* IMPORTING is_head TYPE zet_head_40 iv_version TYPE string
+  "* CHANGING  ct_xml  TYPE string
+
+  DATA: lv_base_iva TYPE decfloat34 VALUE '0',
+        lv_iva      TYPE decfloat34 VALUE '0',
+        lv_tasa     TYPE decfloat34 VALUE '0'.
+
+  FIELD-SYMBOLS: <d>       TYPE any,
+                 <f_amt>   TYPE any,
+                 <f_iva>   TYPE any.
+
+  "---- acumular desde mt_det
+  LOOP AT mt_det ASSIGNING <d>.
+    UNASSIGN: <f_amt>, <f_iva>.
+    ASSIGN COMPONENT 'DMBTR'       OF STRUCTURE <d> TO <f_amt>.  IF <f_amt> IS NOT ASSIGNED. ASSIGN COMPONENT 'NETWR' OF STRUCTURE <d> TO <f_amt>. ENDIF.
+    IF <f_amt> IS NOT ASSIGNED. ASSIGN COMPONENT 'IMPORTE' OF STRUCTURE <d> TO <f_amt>. ENDIF.
+    ASSIGN COMPONENT 'IMPORTE_IVA' OF STRUCTURE <d> TO <f_iva>.  IF <f_iva> IS NOT ASSIGNED. ASSIGN COMPONENT 'IVA'   OF STRUCTURE <d> TO <f_iva>. ENDIF.
+    IF <f_iva> IS NOT ASSIGNED. ASSIGN COMPONENT 'MWSBK' OF STRUCTURE <d> TO <f_iva>. ENDIF.
+
+    DATA(lv_amt) = CONV decfloat34( 0 ).
+    DATA(lv_tx)  = CONV decfloat34( 0 ).
+
+    IF <f_amt> IS ASSIGNED AND <f_amt> IS NOT INITIAL. lv_amt = CONV decfloat34( <f_amt> ). ENDIF.
+    IF <f_iva> IS ASSIGNED AND <f_iva> IS NOT INITIAL. lv_tx  = CONV decfloat34( <f_iva> ). ENDIF.
+
+    IF lv_tx > 0.
+      lv_base_iva = lv_base_iva + lv_amt.
+      lv_iva      = lv_iva      + lv_tx.
+    ENDIF.
+  ENDLOOP.
+
+  " Si no hay IVA, no emitas nodo de impuestos
+  IF lv_iva <= 0.
+    RETURN.
+  ENDIF.
+
+  " tasa global (si no se infiere, 0.16)
+  IF lv_base_iva > 0.
+    lv_tasa = lv_iva / lv_base_iva.
+  ENDIF.
+  IF lv_tasa = 0 AND lv_iva > 0.
+    lv_tasa = '0.16'.
+  ENDIF.
+
+  " strings
+  DATA(lv_tot_iva_str) = |{ lv_iva DECIMALS = 2 }|.    REPLACE ALL OCCURRENCES OF ',' IN lv_tot_iva_str WITH '.'.
+  DATA(lv_base_str)    = |{ lv_base_iva DECIMALS = 2 }|. REPLACE ALL OCCURRENCES OF ',' IN lv_base_str    WITH '.'.
+  DATA(lv_tasa_str)    = |{ lv_tasa DECIMALS = 6 }|.     REPLACE ALL OCCURRENCES OF ',' IN lv_tasa_str    WITH '.'.
+
+  " <cfdi:Impuestos TotalImpuestosTrasladados="...">
+  DATA lv_attr TYPE string.
+  me->add_attr( EXPORTING i_name = 'TotalImpuestosTrasladados' i_val = lv_tot_iva_str CHANGING cv_attr = lv_attr ).
+  me->append_line( EXPORTING iv_line = |<cfdi:Impuestos { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+
+  "   <cfdi:Traslados>
+  me->append_line( EXPORTING iv_line = '<cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+
+  "     <cfdi:Traslado Base=.. Impuesto="002" TipoFactor="Tasa" TasaOCuota=.. Importe=.. />
+  DATA lv_attr_t TYPE string.
+  CLEAR lv_attr_t.
+  me->add_attr( EXPORTING i_name = 'Base'       i_val = lv_base_str CHANGING cv_attr = lv_attr_t ).
+  me->add_attr( EXPORTING i_name = 'Impuesto'   i_val = '002'       CHANGING cv_attr = lv_attr_t ).
+  me->add_attr( EXPORTING i_name = 'TipoFactor' i_val = 'Tasa'      CHANGING cv_attr = lv_attr_t ).
+  me->add_attr( EXPORTING i_name = 'TasaOCuota' i_val = lv_tasa_str CHANGING cv_attr = lv_attr_t ).
+  me->add_attr( EXPORTING i_name = 'Importe'    i_val = lv_tot_iva_str CHANGING cv_attr = lv_attr_t ).
+
+  me->append_line( EXPORTING iv_line = |<cfdi:Traslado { lv_attr_t }/>| CHANGING ct_xml = ct_xml ).
+
+  "   </cfdi:Traslados>
+  me->append_line( EXPORTING iv_line = '</cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+
+  "</cfdi:Impuestos>
+  me->append_line( EXPORTING iv_line = '</cfdi:Impuestos>' CHANGING ct_xml = ct_xml ).
+ENDMETHOD.

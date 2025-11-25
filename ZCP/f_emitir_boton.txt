@@ -1,0 +1,446 @@
+FORM f_emitir_boton .
+
+  CONSTANTS lc_gui_log(30) TYPE c VALUE 'F_STAT_GUI_LOG'.
+  CONSTANTS lc_1 TYPE c VALUE '1'.
+
+  DATA: lv_answer    TYPE c,
+        lv_factura   TYPE vbrk-vbeln,
+        lv_text_stat TYPE string,
+        lv_stat      TYPE zta1_cp1-estatus,
+        lv_name2     TYPE string.
+
+  DATA: lv_any_success TYPE abap_bool VALUE abap_false.
+  DATA: lv_any_error   TYPE abap_bool VALUE abap_false.
+
+  DATA: lwa_factura_010 TYPE ty_factura_010,
+        lwa_factura_012 TYPE ty_factura_012,
+        lwa_factura_017 TYPE ty_factura_017,
+        lwa_vbrk        TYPE ty_vbrk,
+        lwa_t001        TYPE ty_t001,
+        lwa_t001z       TYPE ty_t001z,
+        lwa_kna1        TYPE ty_kna1,
+        lwa_adrc        TYPE ty_adrc.
+  DATA: lwa_bkpf_sd TYPE ty_bkpf_sd.
+
+  DATA: lwa_clientes TYPE zsa1_cp1,
+        lwa_zta1_2   TYPE zsa1_cp1,
+        lwa_zta1_3   TYPE zsa1_cp1.
+
+  DATA: lt_clientes TYPE STANDARD TABLE OF zsa1_cp1,
+        lt_pagos    TYPE STANDARD TABLE OF zsa1_cp1,
+        lt_fac      TYPE STANDARD TABLE OF zsa1_cp1.
+
+  DATA: lv_uuid          TYPE zfid_uuid_cfdi,
+        lv_fechatimbrado TYPE string,
+        lv_certificado   TYPE string,
+        lv_pathpdf       TYPE string,
+        lv_xml_timbrado  TYPE xstring,
+        lv_response      TYPE xstring,
+        vxml             TYPE string.
+
+  DATA lv_estatus TYPE string.
+  DATA ipaso TYPE i.
+  DATA lv_ztpago TYPE zta1_cp1-ztpago.
+  DATA lv_rfc    TYPE stcd1.
+  DATA v_cons    TYPE char35.
+  DATA: lv_tottrlbaseiva16  TYPE ztottrlbase,
+        lv_tottrlimptoiva16 TYPE ztottrlimpto,
+        lv_tottrlbaseiva8   TYPE ztottrlbase,
+        lv_tottrlimptoiva8  TYPE ztottrlimpto.
+  DATA : lo_logger TYPE REF TO zcl_logger.
+
+  " >>> Correcciones y agregados <<<
+  DATA: wa_zcfdit002 TYPE zcfdit002.  " usado por WS timbra (CHANGING)
+  DATA: lv_resstr    TYPE string.     " respuesta PAC en texto (CHANGING)
+  DATA: lv_request   TYPE xstring.    " request PAC para log
+  DATA: lv_qr_ok     TYPE abap_bool,
+        lv_qr_msg    TYPE string.
+
+  " Declaración añadida
+  DATA lv_decimales TYPE i.
+
+  "======== Confirmación de emisión (o forzar en background)
+  IF sy-batch = c_x.
+    lv_answer = lc_1.
+  ELSE.
+    CALL FUNCTION 'POPUP_TO_CONFIRM'
+      EXPORTING
+        titlebar      = TEXT-s01
+        text_question = TEXT-s02
+        text_button_1 = TEXT-s03
+        text_button_2 = TEXT-s04
+      IMPORTING
+        answer        = lv_answer.
+  ENDIF.
+
+  IF lv_answer <> lc_1.
+    RETURN.
+  ENDIF.
+
+  "======== Preparación de sub-conjuntos
+  CLEAR lv_rfc.
+  t_zta1_2[] = t_zta1_aux[].
+  t_zta1_3[] = t_zta1_aux[].
+  DELETE ADJACENT DUPLICATES FROM t_zta1_3 COMPARING ztpago.
+
+  LOOP AT t_zta1_3 INTO lwa_zta1_3 WHERE seleccion = 'X'.
+
+    CLEAR lv_ztpago.
+    CLEAR v_cons.
+    t_zta1_2[] = t_zta1_aux[].
+    DELETE t_zta1_2 WHERE ztpago NE lwa_zta1_3-ztpago.
+
+    LOOP AT t_zta1_2 INTO lwa_zta1_2 WHERE seleccion = 'X' AND ztpago = lwa_zta1_3-ztpago.
+
+      IF lwa_zta1_2-ztmonp = 'MXN'.
+        lv_decimales = 2.
+      ELSE.
+        lv_decimales = 6.
+      ENDIF.
+
+      IF lwa_zta1_2-ztpago NE lv_ztpago.
+        PERFORM f_get_next_numcomp USING 'ZFI_COMP' '01' CHANGING v_cons.
+        IF sy-subrc = 0 AND ipaso = 0.
+          CREATE OBJECT lo_logger
+            EXPORTING
+              iv_extnumber  = v_cons
+              iv_object     = 'ZCP'
+              iv_subobject  = 'PROCESS'
+              iv_repid      = sy-repid
+              iv_enable_log = abap_true.
+          IF sy-subrc = 0. ipaso = 1. ENDIF.
+        ENDIF.
+      ENDIF.
+
+      " Totales con memoria para renglones vacíos
+      IF NOT lwa_zta1_2-tottrlbaseiva16 IS INITIAL AND lv_tottrlbaseiva16 IS INITIAL.
+        lv_tottrlbaseiva16 = lwa_zta1_2-tottrlbaseiva16.
+      ENDIF.
+      IF NOT lwa_zta1_2-tottrlimptoiva16 IS INITIAL AND lv_tottrlimptoiva16 IS INITIAL.
+        lv_tottrlimptoiva16 = lwa_zta1_2-tottrlimptoiva16.
+      ENDIF.
+      IF lwa_zta1_2-tottrlbaseiva16 IS INITIAL AND NOT lv_tottrlbaseiva16 IS INITIAL.
+        lwa_zta1_2-tottrlbaseiva16 = lv_tottrlbaseiva16.
+      ENDIF.
+      IF lwa_zta1_2-tottrlimptoiva16 IS INITIAL AND NOT lv_tottrlimptoiva16 IS INITIAL.
+        lwa_zta1_2-tottrlimptoiva16 = lv_tottrlimptoiva16.
+      ENDIF.
+
+      IF NOT lwa_zta1_2-tottrlbaseiva8 IS INITIAL AND lv_tottrlbaseiva8 IS INITIAL.
+        lv_tottrlbaseiva8 = lwa_zta1_2-tottrlbaseiva8.
+      ENDIF.
+      IF NOT lwa_zta1_2-tottrlimptoiva8 IS INITIAL AND lv_tottrlimptoiva8 IS INITIAL.
+        lv_tottrlimptoiva8 = lwa_zta1_2-tottrlimptoiva8.
+      ENDIF.
+      IF lwa_zta1_2-tottrlbaseiva8 IS INITIAL AND NOT lv_tottrlbaseiva8 IS INITIAL.
+        lwa_zta1_2-tottrlbaseiva8 = lv_tottrlbaseiva8.
+      ENDIF.
+      IF lwa_zta1_2-tottrlimptoiva8 IS INITIAL AND NOT lv_tottrlimptoiva8 IS INITIAL.
+        lwa_zta1_2-tottrlimptoiva8 = lv_tottrlimptoiva8.
+      ENDIF.
+
+      CONCATENATE 'CP' v_cons INTO lwa_zta1_2-numcomp.
+      MODIFY t_zta1_2 FROM lwa_zta1_2 INDEX sy-tabix.
+      MOVE lwa_zta1_2-rfc_cl TO lv_rfc.
+      MOVE lwa_zta1_2-ztpago TO lv_ztpago.
+    ENDLOOP.
+
+  ENDLOOP.
+
+  lt_clientes[] = t_zta1_2[].
+  lt_pagos[]    = t_zta1_2[].
+  lt_fac[]      = t_zta1_2[].
+
+  SORT lt_clientes BY (v_xx8).
+  SORT lt_pagos    BY (v_xx8) bukrs ztpago anio_pago.
+  DELETE ADJACENT DUPLICATES FROM lt_pagos    COMPARING (v_xx8) bukrs ztpago anio_pago.
+  DELETE ADJACENT DUPLICATES FROM lt_clientes COMPARING (v_xx8).
+  SORT lt_fac BY bukrs ztpago anio_pago.
+
+  READ TABLE lt_pagos ASSIGNING FIELD-SYMBOL(<f_pagos>) INDEX 1.
+  IF sy-subrc EQ 0.
+    IF <f_pagos>-tottrlbaseiva8 IS INITIAL AND NOT lv_tottrlbaseiva8 IS INITIAL.
+      <f_pagos>-tottrlbaseiva8 = lv_tottrlbaseiva8.
+    ENDIF.
+    IF <f_pagos>-tottrlimptoiva8 IS INITIAL AND NOT lv_tottrlimptoiva8 IS INITIAL.
+      <f_pagos>-tottrlimptoiva8 = lv_tottrlimptoiva8.
+    ENDIF.
+    MODIFY lt_pagos FROM <f_pagos> INDEX sy-tabix.
+  ENDIF.
+
+  CLEAR lv_tottrlbaseiva16.
+  CLEAR lv_tottrlbaseiva8.
+  CLEAR lv_tottrlimptoiva16.
+  CLEAR lv_tottrlimptoiva8.
+  SORT t_zta1_2 BY (v_xx8).
+
+  "======== Buffers SD/prints
+  PERFORM f_datos_sd.
+
+  "======== Proceso por cliente/pago
+  LOOP AT lt_clientes INTO lwa_clientes.
+
+    "---- Intento recuperar VBELN desde BKPF_SD
+    READ TABLE t_bkpf_sd INTO lwa_bkpf_sd
+         WITH KEY bukrs = lwa_clientes-bukrs
+                  belnr = lwa_clientes-ztfactrel
+                  gjahr = lwa_clientes-anio_fac
+         BINARY SEARCH.
+    IF sy-subrc EQ 0.
+      lv_factura = lwa_bkpf_sd-awkey.
+    ENDIF.
+
+    PERFORM f_leer_datos_sd
+      USING    lwa_clientes lv_factura
+      CHANGING lwa_factura_010
+               lwa_factura_012
+               lwa_factura_017
+               lwa_vbrk
+               lwa_t001
+               lwa_t001z
+               lwa_kna1
+               lwa_adrc.
+
+    " Nombre informativo (póliza / pago)
+    CLEAR lv_name2.
+    IF lwa_clientes-ztpago IS NOT INITIAL.
+      lv_name2 = lwa_clientes-ztpago.
+    ELSEIF lwa_clientes-ztfactrel IS NOT INITIAL.
+      lv_name2 = lwa_clientes-ztfactrel.
+    ENDIF.
+
+    "---- Generación previa del XML
+    CLEAR: vxml, t_xml, t_datos_mail.
+    PERFORM f_genera_xml_cpago
+       USING    lwa_clientes
+                lt_pagos
+                lt_fac
+                lwa_factura_010
+                lwa_factura_012
+                lwa_factura_017
+                lwa_vbrk
+                lwa_t001
+                lwa_t001z
+                lwa_kna1
+                lwa_adrc
+       CHANGING vxml
+                t_xml
+                t_datos_mail.
+
+    " Validar XML requerido
+    IF vxml IS INITIAL.
+      DATA(lv_msgid_now0) = sy-msgid.
+      DATA(lv_msgno_now0) = sy-msgno.
+      DATA(lv_msgv1_now0) = sy-msgv1.
+      DATA(lv_msgv2_now0) = sy-msgv2.
+      DATA(lv_msgv3_now0) = sy-msgv3.
+      DATA(lv_msgv4_now0) = sy-msgv4.
+      DATA lv_resp_xstr_empty TYPE xstring.
+      CLEAR lv_resp_xstr_empty.
+
+      PERFORM f_show_error_detail
+         USING lwa_clientes
+               lv_resp_xstr_empty
+               'XML generado vacío'
+               'Errores Timbrado'
+               lv_msgid_now0 lv_msgno_now0
+               lv_msgv1_now0 lv_msgv2_now0 lv_msgv3_now0 lv_msgv4_now0.
+
+      lv_any_error = abap_true.
+      CONTINUE. " No intenta timbrar sin XML
+    ENDIF.
+
+    "---- Asegurar logger con handle antes del WS  (paracaídas)
+    IF lo_logger IS NOT BOUND.
+      DATA lv_ext_for_log TYPE string.
+      IF lwa_clientes-numcomp IS NOT INITIAL.
+        lv_ext_for_log = lwa_clientes-numcomp.
+      ELSE.
+        lv_ext_for_log = v_cons.
+      ENDIF.
+      CREATE OBJECT lo_logger
+        EXPORTING
+          iv_extnumber  = lv_ext_for_log
+          iv_object     = 'ZCP'
+          iv_subobject  = 'PROCESS'
+          iv_repid      = sy-repid
+          iv_enable_log = abap_true.
+    ENDIF.
+
+    IF lo_logger IS BOUND AND lwa_clientes-numcomp IS NOT INITIAL.
+      lo_logger->set_extnumber( lwa_clientes-numcomp ).
+    ENDIF.
+
+    "---- Timbrado
+    CLEAR: lv_estatus, lv_uuid, lv_fechatimbrado, lv_certificado, lv_pathpdf,
+           lv_xml_timbrado, lv_response, lv_resstr, wa_zcfdit002.
+
+    PERFORM ws_timbra_cpago
+       USING vxml
+             lwa_clientes-bukrs
+             lv_name2
+             lwa_clientes-numcomp
+             lwa_clientes-rfc_cl
+             lwa_clientes-rfc_ord
+       CHANGING
+             lo_logger
+             lv_uuid
+             lv_fechatimbrado
+             lv_certificado
+             lv_pathpdf
+             lv_estatus
+             lv_text_stat
+             lv_xml_timbrado
+             wa_zcfdit002
+             lv_response
+             lv_resstr.
+
+    CLEAR lv_stat.
+    IF lv_estatus = gc_icon_green OR lv_uuid IS NOT INITIAL OR lv_xml_timbrado IS NOT INITIAL.
+      lv_stat = gc_icon_green.
+
+      " Opcional: guarda request/response del PAC
+      CLEAR lv_request.
+      CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+        EXPORTING
+          text   = vxml
+        IMPORTING
+          buffer = lv_request
+        EXCEPTIONS
+          failed = 1
+          OTHERS = 2.
+      PERFORM update_req_response_pac_logica
+              USING
+                lwa_clientes
+                lv_request       " request
+                lv_response.     " response
+    ENDIF.
+
+    v_log = c_x.
+
+    "---- Error: mostrar detalle inmediato
+    IF lv_stat IS INITIAL OR lv_stat = gc_icon_red.
+
+      DATA(lv_msgid_now) = sy-msgid.
+      DATA(lv_msgno_now) = sy-msgno.
+      DATA(lv_msgv1_now) = sy-msgv1.
+      DATA(lv_msgv2_now) = sy-msgv2.
+      DATA(lv_msgv3_now) = sy-msgv3.
+      DATA(lv_msgv4_now) = sy-msgv4.
+
+      IF lv_resstr IS NOT INITIAL.
+        PERFORM f_show_error_resstr USING lwa_clientes lv_resstr 'Error de timbrado'.
+      ENDIF.
+
+      lv_any_error = abap_true.
+      CONTINUE.
+    ENDIF.
+
+    "---- Éxito: reflejar en buffers / ALV y actualizar textos
+    IF lv_stat = gc_icon_green.
+
+      IF lv_pathpdf IS NOT INITIAL.
+        PERFORM f_ensure_extension USING 'pdf' CHANGING lv_pathpdf.
+      ENDIF.
+
+      PERFORM f_replicar_alv_en_cp1
+        USING lwa_clientes
+              lv_stat
+              lv_uuid
+              lv_fechatimbrado
+              lv_certificado
+              lv_pathpdf
+              space
+              lv_request
+              lv_text_stat.
+
+      PERFORM f_sync_alv_line
+        USING lwa_clientes
+              lv_stat
+              lv_uuid
+              lv_fechatimbrado
+              lv_text_stat.
+
+      lv_any_success = abap_true.
+
+      IF lv_name2 IS NOT INITIAL.
+        PERFORM f_cp_pol_set USING lwa_clientes-numcomp lv_name2.
+      ENDIF.
+
+      " Actualiza texto del documento con el UUID (FI)
+      DATA: lv_ok        TYPE flag,
+            lv_msg       TYPE string,
+            lv_belnr_upd TYPE zfid_noper.
+
+      IF lwa_clientes-ztpago IS NOT INITIAL.
+        lv_belnr_upd = lwa_clientes-ztpago.
+      ELSEIF lwa_clientes-ztfactrel IS NOT INITIAL.
+        lv_belnr_upd = lwa_clientes-ztfactrel.
+      ENDIF.
+
+      IF lv_belnr_upd IS NOT INITIAL AND lv_uuid IS NOT INITIAL.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = lv_belnr_upd
+          IMPORTING
+            output = lv_belnr_upd.
+
+        PERFORM f_update_text USING    lv_belnr_upd
+                                      lwa_clientes-anio_pago
+                                      lwa_clientes-bukrs
+                                      lv_uuid
+                                      space
+                             CHANGING lv_ok
+                                      lv_msg.
+      ENDIF.
+
+      " >>> Generar y UPSERT de CODE_QR en ZCP_SOVOS (CFDI 4.0)
+      CLEAR: lv_qr_ok, lv_qr_msg.
+      PERFORM f_upsert_zcp_sovos_qr
+        USING    lwa_clientes
+                 lv_uuid
+                 lv_xml_timbrado
+        CHANGING lv_qr_ok
+                 lv_qr_msg.
+      IF lv_qr_ok IS INITIAL AND lv_qr_msg IS NOT INITIAL.
+        MESSAGE w398(00) WITH lv_qr_msg.
+      ENDIF.
+
+    ENDIF.
+
+    REFRESH t_datos_mail[].
+    REFRESH t_xml[].
+
+  ENDLOOP.
+
+  " Guardar log al final
+  IF lo_logger IS BOUND.
+    lo_logger->save( ).  " BAL_DB_SAVE + refresh
+  ENDIF.
+
+  "======== UPSERT y, si hubo éxito, avisar y refrescar ALV
+  IF lv_any_success = abap_true AND t_zta1_cp1_2 IS NOT INITIAL.
+    DATA lv_default_estatus TYPE zta1_cp1-estatus.
+    lv_default_estatus = gc_icon_green.
+
+    " Inserta/actualiza en ZTA1_CP1 usando el buffer temporal
+    PERFORM f_upsert_zta1_cp1_batch USING 'T_ZTA1_CP1_2' lv_default_estatus.
+
+    " Flujo simple de éxito: mensaje + abrir TEMP + ALV
+    PERFORM f_exito_cp_timbre_simple
+      USING 'T_ZTA1_CP1_2'
+            'Complemento de pago timbrado correctamente.'
+            lc_gui_log.
+
+    " Limpia el buffer
+    REFRESH t_zta1_cp1_2.
+  ENDIF.
+
+  " Si por alguna razón llegamos aquí con último doc en error (respaldo)
+  IF lv_stat IS INITIAL OR lv_stat = gc_icon_red.
+    RETURN.
+  ENDIF.
+
+  PERFORM f_alv_el USING lc_gui_log.
+
+ENDFORM.

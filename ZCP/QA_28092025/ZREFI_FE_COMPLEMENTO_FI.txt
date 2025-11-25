@@ -1,0 +1,199 @@
+*----------------------------------------------------------------------*
+*----------------------------------------------------------------------*
+*                      I N F O T I P O S                               *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                        T A B L A S                                   *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                         T I P O S                                    *
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_bkpf,
+         bukrs TYPE bkpf-bukrs, "2 Sociedad
+         belnr TYPE bkpf-belnr, "3 Número de un documento contable
+         gjahr TYPE bkpf-gjahr, "4 Ejercicio
+         bldat TYPE bkpf-bldat, "6 Fecha de documento en documento
+         cputm TYPE bkpf-cputm, "10 Hora de entrada
+         waers TYPE bkpf-waers, "22 Clave de moneda
+         kursf TYPE bkpf-kursf, "23 Tipo de cambio
+       END OF ty_bkpf.
+
+TYPES: BEGIN OF ty_bseg,
+         bukrs TYPE bseg-bukrs, "2 Sociedad
+         belnr TYPE bseg-belnr, "3 Número de un documento contable
+         gjahr TYPE bseg-gjahr, "4 Ejercicio
+         buzei TYPE bseg-buzei, "5 posición
+         koart TYPE bseg-koart, "11 Clase de cuenta
+         dmbtr TYPE bseg-dmbtr, "20 Importe en moneda local
+         wrbtr TYPE bseg-wrbtr, "21 Importe en la moneda del documento
+         hkont TYPE bseg-hkont, "88 Cuenta de mayor de la contabilidad principal
+         kunnr TYPE bseg-kunnr, "89 Número de deudor
+         xbilk TYPE bseg-xbilk, "92 Indicador: ¿Es la cuenta una cuenta de balance?
+       END OF ty_bseg.
+
+
+TYPES: BEGIN OF ty_bsad,
+         bukrs TYPE bsad-bukrs, "2 Sociedad
+         kunnr TYPE bsad-kunnr, "3 Número de deudor
+         umsks TYPE bsad-umsks, "4 Clase de operación en cuenta de mayor especial
+         umskz TYPE bsad-umskz, "5 Indicador de operación en cuenta de mayor especial
+         augdt TYPE bsad-augdt, "6 Fecha de la compensación
+         augbl TYPE bsad-augbl, "7 Número del documento de compensación
+         zuonr TYPE bsad-zuonr, "8 Número de asignación
+         gjahr TYPE bsad-gjahr, "9 Ejercicio
+         belnr TYPE bsad-belnr, "10 Número de un documento contable
+         buzei TYPE bsad-buzei, "11 Número del apunte contable dentro del documento contable
+         budat TYPE bsad-budat, "12 Fecha de contabilización en el documento
+         cpudt TYPE bsad-cpudt, "14 Día del registro del documento contable
+         waers TYPE bsad-waers, "15 Clave de moneda
+         xblnr TYPE bsad-xblnr, "16 Número de documento de referencia
+         blart TYPE bsad-blart, "17 Clase de documento
+         shkzg TYPE bsad-shkzg, "21 Indicador debe/haber
+         dmbtr TYPE bsad-dmbtr, "24 Importe en moneda local
+         wrbtr TYPE bsad-wrbtr, "25 Importe en la moneda del documento
+         auggj TYPE bsad-auggj, "167 Ejercicio de doc.compensación
+*   BEGIN OF MOD WLECEA
+         flag  TYPE flag,       "Indicador para compensasiones posteriores - Escenario 3
+         imp_dr type wrbtr,
+         impdrml TYPE dmbtr,
+*   END OF MOD WLECEA
+       END OF ty_bsad.
+
+TYPES: BEGIN OF ty_bsid,
+         bukrs TYPE bsid-bukrs, "2 Sociedad
+         kunnr TYPE bsid-kunnr, "3 Número de deudor
+         augbl TYPE bsid-augbl, "7 Número del documento de compensación
+         ZUONR type bsid-ZUONR, "8 Número de asignación
+         gjahr TYPE bsid-gjahr, "9 Ejercicio
+         belnr TYPE bsid-belnr, "10 Número de un documento contable
+         budat TYPE bsid-budat, "12 Fecha de contabilización en el documento
+         cpudt TYPE bsid-cpudt, "14 Día del registro del documento contable
+         waers TYPE bsid-waers, "15 Clave de moneda
+         xblnr TYPE bsid-xblnr, "16 Número de documento de referencia
+         blart TYPE bsid-blart, "17 Clase de documento
+         dmbtr TYPE bsid-dmbtr, "24 Importe en moneda local
+         wrbtr TYPE bsid-wrbtr, "25 Importe en la moneda del documento
+         rebzg TYPE bsid-rebzg, "54 Número documento de factura a la que pertenece la operación
+         rebzj TYPE bsid-rebzj, "55 Ejercicio de la factura correspondiente (para abonos)
+         auggj TYPE bsid-auggj, "167 Ejercicio de doc.compensación
+       END OF ty_bsid.
+
+TYPES: BEGIN OF ty_skb1,
+         bukrs TYPE skb1-bukrs,
+         saknr TYPE skb1-saknr,
+         hbkid TYPE skb1-hbkid,
+         hktid TYPE skb1-hktid,
+       END OF ty_skb1.
+
+TYPES: BEGIN OF ty_t012k,
+         bukrs TYPE t012k-bukrs, "2 Sociedad
+         hbkid TYPE t012k-hbkid, "3 Clave breve para banco propio
+         hktid TYPE t012k-hktid, "4 Clave breve para un banco/cuenta
+         bankn TYPE t012k-bankn, "5 Nº cuenta bancaria
+       END OF ty_t012k.
+
+TYPES: BEGIN OF ty_t012,
+         bukrs TYPE t012-bukrs,
+         hbkid TYPE t012-hbkid,
+         bankl TYPE t012-bankl,
+       END OF ty_t012.
+
+
+TYPES: BEGIN OF ty_bkpf_tc,
+         bukrs TYPE bkpf-bukrs,
+         belnr TYPE bkpf-belnr,
+         gjahr TYPE bkpf-gjahr,
+         budat TYPE bkpf-budat,
+         kursf TYPE bkpf-kursf,
+       END OF ty_bkpf_tc.
+
+
+TYPES: BEGIN OF ty_bseg_uuid,
+         bukrs TYPE bseg-bukrs,
+         belnr TYPE bseg-belnr,
+         gjahr TYPE bseg-gjahr,
+         vbeln TYPE bseg-vbeln,
+       END OF ty_bseg_uuid.
+
+TYPES: BEGIN OF ty_zcfdit001,
+         vbeln TYPE zcfdi_head_40-belnr,
+         bukrs TYPE zcfdi_head_40-bukrs,
+         gjahr TYPE zcfdi_head_40-gjahr,
+         uuid  TYPE zcfdi_head_40-uuid,
+       END OF ty_zcfdit001.
+
+*TYPES: BEGIN OF ty_ztdatosclientes,
+*         bukrs       TYPE ztdatosclientes-bukrs,
+*         kunnr       TYPE ztdatosclientes-kunnr,
+*         waers       TYPE ztdatosclientes-waers,
+*         forma_pago  TYPE ztdatosclientes-forma_pago,
+*         metodo_pago TYPE ztdatosclientes-metodo_pago,
+*         clv_ban_ord TYPE ztdatosclientes-clv_ban_ord,
+*         rfc_ban_ord TYPE ztdatosclientes-rfc_ban_ord,
+*         cta_ord     TYPE ztdatosclientes-cta_ord,
+*       END OF ty_ztdatosclientes.
+
+*----------------------------------------------------------------------*
+*                      C O N S T A N T E S                             *
+*----------------------------------------------------------------------*
+CONSTANTS c_f TYPE c VALUE 'F'.
+CONSTANTS c_p TYPE c VALUE 'P'.
+
+*----------------------------------------------------------------------*
+*                      E S T R U C T U R A S                           *
+*----------------------------------------------------------------------*
+DATA wa_bkpf TYPE ty_bkpf.
+
+*----------------------------------------------------------------------*
+*                  T A B L A S  I N T E R N A S                        *
+*----------------------------------------------------------------------*
+DATA t_bkpf TYPE STANDARD TABLE OF ty_bkpf.
+DATA t_bseg TYPE STANDARD TABLE OF ty_bseg.
+DATA t_bseg_s TYPE STANDARD TABLE OF ty_bseg.
+DATA t_bseg_k TYPE STANDARD TABLE OF ty_bseg. "WLECEA
+DATA t_tdoc TYPE STANDARD TABLE OF zttipodoc.
+DATA t_bsad TYPE STANDARD TABLE OF ty_bsad.
+DATA t_bsad_aux TYPE STANDARD TABLE OF ty_bsad.
+DATA t_datcl TYPE STANDARD TABLE OF ztdatosclientes.
+DATA t_comisiones TYPE STANDARD TABLE OF zta1_comisiones.
+DATA t_bsid TYPE STANDARD TABLE OF ty_bsid.
+DATA t_bsid_aux TYPE STANDARD TABLE OF ty_bsid.
+DATA t_skb1 TYPE STANDARD TABLE OF ty_skb1.
+DATA t_t012k TYPE STANDARD TABLE OF ty_t012k.
+DATA t_t012 TYPE STANDARD TABLE OF ty_t012.
+DATA t_bkpf_tc TYPE STANDARD TABLE OF ty_bkpf_tc.
+DATA t_ztbancos TYPE STANDARD TABLE OF ztbancos.
+DATA t_bseg_uuid TYPE STANDARD TABLE OF ty_bseg_uuid.
+DATA t_zcfdit001 TYPE STANDARD TABLE OF ty_zcfdit001.
+DATA t_bsad_cpt TYPE STANDARD TABLE OF ty_bsad.
+DATA t_bsad_cpt_aux TYPE STANDARD TABLE OF ty_bsad.
+DATA t_bsid_cpp TYPE STANDARD TABLE OF ty_bsid.
+DATA t_bsid_cpp_aux TYPE STANDARD TABLE OF ty_bsid.
+DATA t_bsad_cpo TYPE STANDARD TABLE OF ty_bsad.
+DATA t_bsad_cpo_aux TYPE STANDARD TABLE OF ty_bsad.
+DATA t_ztssaldos TYPE STANDARD TABLE OF ztssaldos.
+DATA t_ztssaldos2 TYPE STANDARD TABLE OF ztssaldos.
+DATA t_ztmpago TYPE STANDARD TABLE OF ztmpago.
+*DATA t_uuid_pmx TYPE STANDARD TABLE OF zce_xmlcfdi. "REACTIVAR
+*----------------------------------------------------------------------*
+*                          R A N G O S                                 *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                      F I E L D - S Y M B O L S                       *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                      V A R I A B L E S                               *
+*----------------------------------------------------------------------*
+DATA lv_index TYPE sy-tabix.
+
+*----------------------------------------------------------------------*
+*                       C L A S E S                                    *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                     P A R A M E T R O S                              *
+*----------------------------------------------------------------------*

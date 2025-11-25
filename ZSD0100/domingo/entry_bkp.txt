@@ -1,0 +1,113 @@
+
+  DATA: lo_cfdi        TYPE REF TO zcl_zmfcfdi40_mgs,
+        lo_logger      TYPE REF TO zcl_logger,
+        lv_vbeln       TYPE vbeln,
+        lv_error       TYPE string,
+        lx_root        TYPE REF TO cx_root.
+
+  CONSTANTS: c_log_objt   TYPE balobj_d   VALUE 'ZCFDI',
+             c_log_subobj TYPE balsubobj  VALUE 'TIMBRADO'.
+
+  CLEAR: lv_error, return_code.
+
+  " 🔹 Validar tipo de mensaje antes de continuar
+  IF nast-kschl <> 'ZRF1' AND nast-kschl <> 'ZRF2'.
+    return_code = 1.
+    PERFORM update_from_logger USING lo_logger return_code nast.
+    RETURN.
+  ENDIF.
+
+  " 🔹 Obtener número de factura desde NAST
+  lv_vbeln = nast-objky.
+
+  " 🔹 Crear logger
+  TRY.
+      CREATE OBJECT lo_logger
+        EXPORTING
+          iv_extnumber = lv_vbeln
+          iv_object    = c_log_objt
+          iv_subobject = c_log_subobj
+          iv_repid     = sy-repid.
+
+      lo_logger->add_text( EXPORTING iv_type = 'I' iv_text = |ENTRY iniciado para documento { lv_vbeln }| ).
+    CATCH cx_root INTO lx_root.
+      " Si falla el logger, continuar sin trazabilidad
+  ENDTRY.
+
+  " 🔹 Validar que OBJKEY no esté vacío
+  IF lv_vbeln IS INITIAL.
+    lv_error = 'OBJKEY vacío en NAST.'.
+    return_code = 1.
+    IF lo_logger IS BOUND.
+      lo_logger->add_text( EXPORTING iv_type = 'E' iv_text = lv_error ).
+    ENDIF.
+    PERFORM update_from_logger USING lo_logger return_code nast.
+    RETURN.
+  ENDIF.
+
+  " 🔹 Validar existencia en VBRK
+  SELECT SINGLE vbeln FROM vbrk INTO lv_vbeln WHERE vbeln = lv_vbeln.
+  IF sy-subrc <> 0.
+    lv_error = |Factura { lv_vbeln } no existe en VBRK.|.
+    return_code = 1.
+    IF lo_logger IS BOUND.
+      lo_logger->add_text( EXPORTING iv_type = 'E' iv_text = lv_error ).
+    ENDIF.
+    PERFORM update_from_logger USING lo_logger return_code nast.
+    RETURN.
+  ENDIF.
+
+  " 🔹 Instanciar clase CFDI y procesar
+  TRY.
+      CREATE OBJECT lo_cfdi.
+
+      CALL METHOD lo_cfdi->procesar_salida_mensaje
+        EXPORTING
+          iv_objkey = nast-objky
+          iv_nacha  = nast-nacha
+          iv_spras  = nast-spras
+        IMPORTING
+          ev_error  = lv_error
+        CHANGING
+          po_logger = lo_logger.
+
+      IF lv_error IS NOT INITIAL OR lo_cfdi->was_successful( ) <> abap_true.
+        return_code = 1.
+        IF lo_logger IS BOUND.
+          lo_logger->add_text( EXPORTING iv_type = 'E' iv_text = |Error en timbrado: { lv_error }| ).
+        ENDIF.
+        PERFORM update_from_logger USING lo_logger return_code nast.
+        RETURN.
+      ENDIF.
+    CATCH cx_root INTO lx_root.
+      lv_error = lx_root->get_text( ).
+      return_code = 1.
+      IF lo_logger IS BOUND.
+        lo_logger->add_text( EXPORTING iv_type = 'E' iv_text = |Excepción en procesamiento: { lv_error }| ).
+      ENDIF.
+      PERFORM update_from_logger USING lo_logger return_code nast.
+      RETURN.
+  ENDTRY.
+
+  " 🔹 Evaluar resultado
+  IF lv_error IS INITIAL AND lo_cfdi->was_successful( ) = abap_true.
+    return_code = 0.
+    IF lo_logger IS BOUND.
+      lo_logger->add_text( EXPORTING iv_type = 'S' iv_text = 'Timbrado exitoso.' ).
+    ENDIF.
+  ELSE.
+    return_code = 1.
+    IF lv_error IS INITIAL.
+      lv_error = 'Proceso finalizó sin error explícito pero no se generó factura.'.
+    ENDIF.
+    IF lo_logger IS BOUND.
+      lo_logger->add_text( EXPORTING iv_type = 'E' iv_text = |Error en timbrado: { lv_error }| ).
+    ENDIF.
+  ENDIF.
+
+  " 🔹 Finalizar y registrar log
+  IF lo_logger IS BOUND.
+    lo_logger->add_text( EXPORTING iv_type = 'I' iv_text = |Fin de ENTRY para documento { lv_vbeln }| ).
+  ENDIF.
+
+  PERFORM update_from_logger USING lo_logger return_code nast.

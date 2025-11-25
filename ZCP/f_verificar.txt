@@ -1,0 +1,41 @@
+FORM f_verificar .
+
+  DATA lv_band TYPE c.
+
+  CONSTANTS lc_gui_emitir(30) TYPE c VALUE 'F_STAT_GUI_EMITIR'.
+
+*Validar datos capturados
+  PERFORM f_valida_registros.
+
+*Validar pago completo
+  PERFORM f_valid_pago_comp
+    CHANGING lv_band.
+
+  IF lv_band NE c_x.
+
+    IF t_zta1_2[] IS INITIAL.
+
+      MESSAGE TEXT-004"No hay información para mostrar
+         TYPE c_e.
+
+    ELSE.
+
+      SORT t_zta1_2[]
+        BY bukrs
+           kunnr
+           ztpago
+           anio_pago
+           ztfactrel
+           anio_fac.
+"$$
+"$$
+"$$
+
+      PERFORM f_alv_el
+        USING lc_gui_emitir.
+
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.

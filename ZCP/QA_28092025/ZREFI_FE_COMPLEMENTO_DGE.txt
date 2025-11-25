@@ -1,0 +1,353 @@
+
+"=== Contexto (si no lo tienes aún)
+CONSTANTS: gc_ctx_emitir  TYPE char8 VALUE 'EMITIR',
+           gc_ctx_reporte TYPE char8 VALUE 'REPORTE'.
+DATA: gv_ctx       TYPE char8,
+      gv_from_back TYPE abap_bool,
+      gv_alv_exit  TYPE abap_bool.
+DATA:
+      gv_alv_user_exit    TYPE abap_bool VALUE abap_false,
+      gv_back_request  TYPE abap_bool VALUE abap_false,  "pedido de back desde ALV
+      gv_in_verificar  TYPE abap_bool VALUE abap_false.  "reentrancia guard
+
+
+
+*----------------------------------------------------------------------*
+*                      I N F O T I P O S                               *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                        T A B L A S                                   *
+*----------------------------------------------------------------------*
+TABLES: skb1,
+        bkpf,
+        kna1,
+        arc_params,
+        TOA_DARA,
+        NAST.
+
+*----------------------------------------------------------------------*
+*                         T I P O S                                    *
+*----------------------------------------------------------------------*
+TYPES:
+  BEGIN OF ty_xml,
+    linea TYPE string,
+  END OF ty_xml.
+
+TYPES:
+  BEGIN OF ty_datos_mail,
+    cliente TYPE zta1_cp1-nombre,
+    pago    TYPE zta1_cp1-ztpago,
+  END OF ty_datos_mail.
+
+TYPES:
+  BEGIN OF ty_txt,
+*    id    TYPE char25,
+    nodo(2) TYPE n,
+    valor   TYPE string,
+  END OF ty_txt.
+
+TYPES:
+  BEGIN OF ty_tc,
+    bukrs TYPE bkpf-bukrs,
+    belnr TYPE bkpf-belnr,
+    gjahr TYPE bkpf-gjahr,
+    tc    TYPE p DECIMALS 10,"Cambio a 10 decimales de 6
+  END OF ty_tc.
+
+"MOD AJCV 19/08/2022
+TYPES:
+  BEGIN OF ty_bases_p,
+    lv_belnr_base      TYPE belnr_d, "Número de un documento contable
+    lv_tasaocuota_base TYPE c LENGTH 8,
+    lv_0bases_p        TYPE p DECIMALS 2,
+    lv_8bases_p        TYPE p DECIMALS 2,
+    lv_16bases_p       TYPE p DECIMALS 2,
+    lv_ebases_p        TYPE p DECIMALS 2,
+  END OF ty_bases_p,
+
+  "MOD AJCV 19/08/2022
+  BEGIN OF ty_importes_p,
+    lv_belnr_importe      TYPE belnr_d, "Número de un documento contable
+    lv_tasaocuota_importe TYPE c LENGTH 8,
+    lv_0importes_p        TYPE p DECIMALS 2,
+    lv_8importes_p        TYPE p DECIMALS 2,
+    lv_16importes_p       TYPE p DECIMALS 2,
+    lv_eimportes_p        TYPE p DECIMALS 2,
+  END OF ty_importes_p,
+
+  "MOD AJCV 19/08/2022
+  BEGIN OF ty_imptbase,
+    lv_belnr            TYPE belnr_d, "Número de un documento contable
+    lv_tasaocuotaimptop TYPE c LENGTH 8,
+    lv_baseimptop(20)   TYPE c,
+    lv_impteimptop(20)  TYPE c,
+  END OF ty_imptbase,
+
+  "MOD AGSN 06/10/2022
+  BEGIN OF ty_t880,
+    rcomp TYPE t880-rcomp,
+    name1 TYPE t880-name1,
+  END OF ty_t880,
+
+
+   BEGIN OF ty_t005,
+     land1  TYPE t005-land1,
+     intca3 TYPE t005-intca3,
+   END OF ty_t005,
+
+
+
+  "MOD AJCV 19/08/2022
+  BEGIN OF ty_motototal,
+    lv_belnr          TYPE belnr_d, "Número de un documento contable
+    lv_montototal(20) TYPE c,
+  END OF ty_motototal.
+
+TYPES ty_tt_zta1_cp1 TYPE STANDARD TABLE OF zsa1_cp1."ty_zta1_cp1.
+TYPES ty_tt_zsdmxt020 TYPE STANDARD TABLE OF zsdmxt020.
+TYPES ty_tt_tline TYPE STANDARD TABLE OF tline.
+TYPES ty_tt_datos_mail TYPE STANDARD TABLE OF ty_datos_mail.
+
+TYPE-POOLS: slis.
+
+
+*----------------------------------------------------------------------*
+*                      C O N S T A N T E S                             *
+*----------------------------------------------------------------------*
+CONSTANTS c_x TYPE c VALUE 'X'.
+CONSTANTS c_o TYPE c VALUE 'O'. "VYGC
+CONSTANTS c_s TYPE c VALUE 'S'.
+CONSTANTS c_e TYPE c VALUE 'E'.
+CONSTANTS c_i TYPE c VALUE 'I'.
+CONSTANTS c_veri(4) TYPE c VALUE 'VERI'.
+CONSTANTS c_banc(4) TYPE c VALUE 'BANC'.
+CONSTANTS c_tpol(4) TYPE c VALUE 'TPOL'.
+CONSTANTS c_mone(4) TYPE c VALUE 'MONE'.
+CONSTANTS c_datc(4) TYPE c VALUE 'DATC'.
+CONSTANTS c_rojo(4) TYPE c VALUE '@0A@'.
+CONSTANTS c_amarillo(4) TYPE c VALUE '@09@'.
+CONSTANTS c_verde(4) TYPE c VALUE '@08@'.
+CONSTANTS c_seleccion TYPE char15 VALUE 'SELECCION'.
+CONSTANTS c_uuid_comp TYPE char15 VALUE 'UUID_COMP'.
+CONSTANTS c_uuid_fac TYPE char15 VALUE 'UUID_FAC'.
+CONSTANTS c_folio_fac TYPE char15 VALUE 'ZTFOLFACT'.
+CONSTANTS c_estatus TYPE char15 VALUE 'ESTATUS'.
+CONSTANTS c_forma_pag TYPE char15 VALUE 'ZTFORMAPAGO'.
+CONSTANTS c_mpag TYPE char15 VALUE 'MET_PAGODR'.
+CONSTANTS c_no_oper TYPE char15 VALUE 'NO_OPER'.
+CONSTANTS c_rfc_ord TYPE char15 VALUE 'RFC_ORD'.
+CONSTANTS c_nom_ban TYPE char15 VALUE 'ZTBCOORD'.
+CONSTANTS c_cta_ord TYPE char15 VALUE 'CTA_ORD'.
+CONSTANTS c_rfc_ben TYPE char15 VALUE 'RFC_BEN'.
+CONSTANTS c_cta_benef TYPE char15 VALUE 'CTA_BENEF'.
+CONSTANTS c_tipo_cadpago TYPE char15 VALUE 'TIPO_CADPAGO'.
+CONSTANTS c_cert_pago TYPE char15 VALUE 'CERT_PAGO'.
+CONSTANTS c_nocert TYPE char15 VALUE 'NO_CERT'.
+CONSTANTS c_cad_pago TYPE char15 VALUE 'CAD_PAGO'.
+CONSTANTS c_sello_pag TYPE char15 VALUE 'SELLO_PAG'.
+CONSTANTS c_serie TYPE char15 VALUE 'SERIE'.
+CONSTANTS c_anio_pago(9) TYPE c VALUE 'ANIO_PAGO'.
+CONSTANTS c_anio_fac(8) TYPE c VALUE 'ANIO_FAC'.
+CONSTANTS c_rutaxml(8) TYPE c VALUE 'RUTA_XML'.
+CONSTANTS c_rutapdf(8) TYPE c VALUE 'RUTA_PDF'.
+CONSTANTS c_salant(11) TYPE c VALUE 'IMP_SAL_ANT'.
+CONSTANTS c_num_par(7) TYPE c VALUE 'NUM_PAR'.
+CONSTANTS c_zsustituye(10) TYPE c VALUE 'ZSUSTITUYE'.
+CONSTANTS c_imp_pag(7) TYPE c VALUE 'IMP_PAG'.
+CONSTANTS c_mxn(3) TYPE c VALUE 'MXN'.
+CONSTANTS c_xml(3) TYPE c VALUE 'XML'.
+CONSTANTS c_lk_uuid(7) TYPE c VALUE 'LK_UUID'.
+CONSTANTS c_sd(2) TYPE c VALUE 'SD'.
+CONSTANTS c_fi(2) TYPE c VALUE 'FI'.
+CONSTANTS c_srvsim(6) TYPE c VALUE 'SRVSIM'.
+CONSTANTS c_detecno(7) TYPE c VALUE 'DETECNO'.
+CONSTANTS c_edicom(6) TYPE c VALUE 'EDICOM'.
+CONSTANTS c_fact(11) TYPE c VALUE 'FACTURACION'.
+CONSTANTS c_ftp(3) TYPE c VALUE 'FTP'.
+CONSTANTS c_ws(2) TYPE c VALUE 'WS'.
+CONSTANTS c_sql(3) TYPE c VALUE 'SQL'.
+CONSTANTS c_al11(4) TYPE c VALUE 'AL11'.
+CONSTANTS c_met(3) TYPE c VALUE 'MET'.
+CONSTANTS c_txt(3) TYPE c VALUE 'TXT'.
+CONSTANTS c_numcomp(7) TYPE c VALUE 'NUMCOMP'.
+CONSTANTS c_zsust(10) TYPE c VALUE 'ZSUSTITUYE'.
+*CONSTANTS c_canc(9)      TYPE c VALUE 'Cancelado'.
+
+*----------------------------------------------------------------------*
+*                      E S T R U C T U R A S                           *
+*----------------------------------------------------------------------*
+DATA wa_zta1_cp1 TYPE zta1_cp1.
+DATA wa_zta1_cpr TYPE zta1_cp1.
+DATA wa_zta1_aux TYPE zsa1_cp1."ty_zta1_cp1.
+DATA wa_zcfdit002 TYPE zcfdit002.
+DATA wa_zcp_sovos TYPE zcp_sovos.
+
+DATA w_output TYPE c.
+
+
+DATA: gv_categoria  TYPE string,
+      gv_comentario TYPE string.
+
+*----------------------------------------------------------------------*
+*                  T A B L A S  I N T E R N A S                        *
+*----------------------------------------------------------------------*
+DATA t_fieldcat TYPE lvc_t_fcat.
+DATA t_fieldcat_emitir TYPE slis_t_fieldcat_alv.
+DATA t_zta1_cp1 TYPE TABLE OF zta1_cp1.
+DATA t_zta1_cp1_2 TYPE TABLE OF zta1_cp1.
+
+DATA: t_bases_p    TYPE ztty_bases_p, " MOD ADCV 19/08/2022
+      t_importes_p TYPE ztt_importes_p, " MOD ADCV 19/08/2022
+      t_imptbase   TYPE ztt_importe_b, " MOD ADCV 19/08/2022
+      t_zta1_cp2    TYPE TABLE OF zta2_cp2,
+      t_motototal  TYPE TABLE OF ty_motototal. " MOD ADCV 19/08/2022
+
+"BOM NACP 20220608
+*DATA t_zta1_aux TYPE TABLE OF zsa1_cp1."ty_zta1_cp1.
+DATA t_zta1_aux TYPE ztt_sa1_cp1.
+"EOM NACP 20220608
+
+DATA t_zta1_2 TYPE TABLE OF zsa1_cp1."ty_zta1_cp1.
+DATA t_zta1_3 TYPE TABLE OF zsa1_cp1."ty_zta1_cp1.
+DATA t_ztfpago TYPE STANDARD TABLE OF ztfpago.
+DATA t_xml TYPE TABLE OF ty_xml.
+DATA t_excluding TYPE slis_t_extab.
+DATA t_datos_mail TYPE STANDARD TABLE OF ty_datos_mail.
+DATA t_zta1_rutin TYPE STANDARD TABLE OF zta1_rutin.
+DATA t_zta1_cp1_ren TYPE TABLE OF zta1_cp1. "PRENV
+DATA t_txt TYPE TABLE OF ty_txt.
+DATA t_tc TYPE TABLE OF ty_tc.
+
+"=== Salidas para los dos ALV (mismo tipo que tu tabla principal)
+DATA: gt_out_emitir LIKE t_zta1_2,
+      gt_out_repo   LIKE t_zta1_2.
+
+*----------------------------------------------------------------------*
+*                          R A N G O S                                 *
+*----------------------------------------------------------------------*
+DATA v_any TYPE char50.
+RANGES s_kunnr2 FOR v_any. "bseg-kunnr.
+*----------------------------------------------------------------------*
+*                      F I E L D - S Y M B O L S                       *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                      V A R I A B L E S                               *
+*----------------------------------------------------------------------*
+DATA v_cont TYPE sy-tabix.
+DATA v_log TYPE c.
+DATA v_xx1 TYPE zta1_rutin-rut.
+DATA v_xx2 TYPE zta1_rutin-rut.
+DATA v_xx3 TYPE zta1_rutin-rut.
+DATA v_xx4 TYPE zta1_rutin-rut.
+DATA v_xx5 TYPE zta1_rutin-rut.
+DATA v_xx6 TYPE zta1_rutin-rut.
+DATA v_xx7 TYPE zta1_rutin-rut.
+DATA v_xx8 TYPE zta1_rutin-rut.
+DATA v_xx9 TYPE zta1_rutin-rut.
+DATA v_x10 TYPE zta1_rutin-rut.
+DATA v_x11 TYPE zta1_rutin-rut.
+DATA v_x12 TYPE zta1_rutin-rut.
+DATA v_x13 TYPE zta1_rutin-rut.
+DATA v_x14 TYPE zta1_rutin-rut.
+DATA v_x15 TYPE zta1_rutin-rut.
+DATA v_x17 TYPE zta1_rutin-rut.
+DATA v_x18 TYPE zta1_rutin-rut.
+DATA v_x19 TYPE zta1_rutin-rut.
+DATA v_x20 TYPE zta1_rutin-rut.
+DATA v_x21 TYPE zta1_rutin-rut.
+DATA v_x22 TYPE zta1_rutin-rut.
+DATA v_x23 TYPE zta1_rutin-rut.
+DATA v_x24 TYPE zta1_rutin-rut.
+DATA v_x25 TYPE zta1_rutin-rut.
+DATA v_x36 TYPE zta1_rutin-rut.
+DATA v_x40 TYPE zta1_rutin-rut.
+DATA v_cl TYPE c.
+DATA v_row TYPE sy-tabix.
+DATA lv_tc_doc TYPE bkpf-kursf.
+
+DATA: v_cons TYPE n LENGTH 10.
+DATA v_nodo(2) TYPE n.
+DATA: lv_tc_dr TYPE p DECIMALS 10.
+DATA gv_case_cp20 TYPE char4. "dnavoa060722
+data v_mondif type c. "vygc 04.07.2023
+
+*----------------------------------------------------------------------*
+*                       C L A S E S                                    *
+*----------------------------------------------------------------------*
+DATA cl_wsdl_test TYPE REF TO zpro_co_iemision. "Srvsim
+*----------------------------------------------------------------------*
+*                     P A R A M E T R O S                              *
+*----------------------------------------------------------------------*
+"=== Botones en la cabecera de parámetros ==========================
+SELECTION-SCREEN BEGIN OF LINE.
+  SELECTION-SCREEN PUSHBUTTON  1(10)  TEXT-bt1 USER-COMMAND BANC.  "Bancos
+  SELECTION-SCREEN PUSHBUTTON 12(14)  TEXT-bt2 USER-COMMAND TPOL.  "Tipo de póliza
+  SELECTION-SCREEN PUSHBUTTON 27(18)  TEXT-bt3 USER-COMMAND MONE.  "Tipo de moneda
+  SELECTION-SCREEN PUSHBUTTON 46(13)  TEXT-bt4 USER-COMMAND DATC.  "Datos clientes
+  SELECTION-SCREEN PUSHBUTTON 60(13)  TEXT-bt5 USER-COMMAND VERI.  "1. Verificar
+SELECTION-SCREEN END OF LINE.
+
+
+SELECTION-SCREEN: BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-h01.
+
+*SELECT-OPTIONS: s_ktopl FOR ska1-ktopl MEMORY ID kpl NO INTERVALS NO-EXTENSION,
+  SELECT-OPTIONS: s_bukrs FOR skb1-bukrs NO INTERVALS NO-EXTENSION,
+                  s_monat FOR bkpf-monat,                   "#EC EXISTS
+                  s_gjahr FOR bkpf-gjahr NO INTERVALS NO-EXTENSION,
+                  s_kunnr FOR kna1-kunnr.
+
+SELECTION-SCREEN: END OF BLOCK b1.
+
+SELECTION-SCREEN: BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-h02.
+
+  PARAMETERS: p_emit RADIOBUTTON GROUP a DEFAULT 'X' USER-COMMAND d, "Emitir CFDI CP
+              p_sust RADIOBUTTON GROUP a,                            "Sustituir CFDI CP
+              p_renv RADIOBUTTON GROUP a,                            "Reenviar CFDI CP
+              p_repo RADIOBUTTON GROUP a.                            "Reporte
+
+SELECTION-SCREEN: END OF BLOCK b2.
+
+*Emitir CFDI
+SELECTION-SCREEN: BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-h03.
+
+  PARAMETERS: p_pmas RADIOBUTTON GROUP b DEFAULT 'X' USER-COMMAND d, "Pagos Masivos
+              p_pind RADIOBUTTON GROUP b.                            "Pago Individual
+
+  SELECTION-SCREEN: BEGIN OF BLOCK b31 WITH FRAME TITLE TEXT-h07.
+    SELECT-OPTIONS s_pagind FOR bkpf-belnr NO INTERVALS NO-EXTENSION.
+  SELECTION-SCREEN: END OF BLOCK b31.
+
+SELECTION-SCREEN: END OF BLOCK b3.
+
+*Sección de Sustitución de CFDI CP
+SELECTION-SCREEN: BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-h04.
+
+*SELECTION-SCREEN: BEGIN OF LINE.
+*
+*SELECTION-SCREEN: COMMENT 1(31) text-001 FOR FIELD p_docanu. "No de Documento de pago (Anulacion)
+  SELECT-OPTIONS: s_docanu FOR bkpf-belnr NO INTERVALS.
+*
+*
+*SELECTION-SCREEN: COMMENT 52(20) text-002 FOR FIELD p_uuidpa.
+  PARAMETERS: p_uuidpa TYPE zta1_cp1-uuid_comp.
+*
+*
+*SELECTION-SCREEN: END OF LINE.
+
+*SELECT-OPTIONS s_gjahra FOR bkpf-gjahr NO INTERVALS NO-EXTENSION.
+
+  SELECT-OPTIONS: s_docpag FOR bkpf-belnr NO INTERVALS. "No de Documento de pago  (Sustitucion)
+
+  SELECT-OPTIONS s_gjahrs FOR bkpf-gjahr NO INTERVALS NO-EXTENSION.
+
+SELECTION-SCREEN: END OF BLOCK b4.
+
+*Sección de Reporte CFDI CP
+SELECTION-SCREEN: BEGIN OF BLOCK b5 WITH FRAME TITLE TEXT-h05.
+
+  PARAMETERS: p_timb RADIOBUTTON GROUP c DEFAULT 'X', "Timbrados
+              p_cerr RADIOBUTTON GROUP c.             "Con Error
+
+SELECTION-SCREEN: END OF BLOCK b5.

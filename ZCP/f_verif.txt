@@ -1,0 +1,72 @@
+FORM f_verif .
+
+  DATA lv_band TYPE c.
+
+  REFRESH: t_zta1_aux[],
+           t_zta1_cp1[],
+           t_zta1_2[],
+           t_zta1_cp1_2[],
+           t_xml[].
+
+  REFRESH t_ztssaldos[]. "VYGC
+  REFRESH t_ztssaldos2[]. "VYGC
+
+  CLEAR v_log.
+
+  PERFORM f_campos_req
+    CHANGING lv_band.
+
+  IF lv_band NE c_x.
+
+*Clasificación de clases de documento
+    SELECT *
+      FROM zttipodoc
+      INTO TABLE t_tdoc
+     WHERE bukrs IN s_bukrs.
+
+    IF sy-subrc = 0 AND
+       t_tdoc[] IS NOT INITIAL.
+
+      SORT t_tdoc
+        BY bukrs
+           blart.
+
+    ENDIF.
+
+*Parametrizaciones:
+    PERFORM f_param.
+
+*Emision
+    IF p_emit = c_x.
+
+      PERFORM f_veri_emis.
+
+*Sustitución
+    ELSEIF p_sust = c_x.
+
+*   Validar bloque de sustitución
+      PERFORM f_valida_sust
+        CHANGING lv_band.
+
+      IF lv_band NE c_x.
+
+*   Verificar información
+        PERFORM f_veri_sust.
+
+      ENDIF.
+
+*Re-envio
+    ELSEIF p_renv = c_x.
+
+      PERFORM f_veri_renv.
+
+*Reporte
+    ELSEIF p_repo = c_x.
+
+      PERFORM f_veri_repo.
+
+    ENDIF.
+
+  ENDIF.
+
+ENDFORM.

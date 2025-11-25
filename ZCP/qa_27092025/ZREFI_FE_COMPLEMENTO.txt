@@ -1,0 +1,78 @@
+REPORT zrefi_fe_complemento.
+TABLES sscrfields.
+
+"=== Banderas globales ===
+DATA gv_cancel           TYPE abap_bool VALUE abap_false.
+DATA gv_pbo_init_0100    TYPE abap_bool VALUE abap_false.
+DATA gv_need_popup       TYPE abap_bool VALUE abap_false.
+DATA gv_habilitar_campos TYPE abap_bool VALUE abap_false.
+
+" Nuevas banderas para salir limpio del ALV
+
+
+
+INCLUDE zrefi_fe_complemento_01. "Declaraciones
+INCLUDE zrefi_fe_complemento_02. "Rutinas
+
+"=== Eventos de la pantalla de selección ===
+AT SELECTION-SCREEN OUTPUT.
+  LOOP AT SCREEN.
+    PERFORM f_mod_screen.
+    MODIFY SCREEN.
+  ENDLOOP.
+
+AT SELECTION-SCREEN ON EXIT-COMMAND.
+  CASE sscrfields-ucomm.
+    WHEN 'BACK' OR 'EXIT' OR 'CANC'.
+      gv_from_back = abap_true.        "marca que el usuario quiso salir
+      CLEAR sscrfields-ucomm.          "consume el comando
+      LEAVE TO SCREEN 1000.            "QUEDARSE en la dynpro de parámetros
+    WHEN OTHERS.
+      "nada
+  ENDCASE.
+
+
+
+AT SELECTION-SCREEN.
+  CASE sscrfields-ucomm.
+    WHEN 'BANC'.  PERFORM f_tbl_bancos.         CLEAR sscrfields-ucomm. RETURN.
+    WHEN 'TPOL'.  PERFORM f_tpoliza.            CLEAR sscrfields-ucomm. RETURN.
+    WHEN 'MONE'.  PERFORM f_tmoneda.            CLEAR sscrfields-ucomm. RETURN.
+    WHEN 'DATC'.  PERFORM f_tdatos_cliente.     CLEAR sscrfields-ucomm. RETURN.
+    WHEN 'VERI'.  PERFORM f_verif. PERFORM f_verificar.
+                  CLEAR sscrfields-ucomm. RETURN.
+
+    WHEN 'BACK' OR 'EXIT' OR 'CANC'. RETURN.     "no cierres el programa
+    WHEN 'ONLI'.  "F8 - dejar continuar a START-OF-SELECTION
+    WHEN OTHERS.  RETURN.                        "variantes, ayudas, etc.
+  ENDCASE.
+
+
+
+"=== Inicio del reporte ===
+START-OF-SELECTION.
+
+ IF sy-batch = 'X'.
+    PERFORM f_verif.
+    PERFORM f_verificar.
+    PERFORM f_emitir.
+    RETURN.
+  ENDIF.
+
+  CLEAR: gv_from_back, gv_alv_user_exit.
+
+  PERFORM f_verif.
+  PERFORM f_verificar.
+
+  IF gv_from_back = abap_true OR gv_alv_user_exit = abap_true.
+    CLEAR: gv_from_back, gv_alv_user_exit.
+    RETURN.             "o LEAVE PROGRAM, según prefieras
+  ENDIF.
+
+"=== Includes de módulos y lógicas ===
+INCLUDE zrefi_fe_complemento_statuso01.
+INCLUDE zrefi_fe_complemento_user_ci01.
+INCLUDE zrefi_fe_complemento_popup.
+
+
+INCLUDE zrefi_fe_complemento_logica.

@@ -1,0 +1,100 @@
+{\rtf1\ansi\deff0
+{\fonttbl{\f0 Calibri;}{\f1 Consolas;}}
+\fs24
+
+\b\fs36 Plantilla de Documentaci\'f3n de Dynpro (SAP)\b0\fs24\par
+\pard\sb120\par
+
+\b 1. Datos generales\b0\par
+\ul Prop\'f3sito\ul0: [Describir objetivo del Dynpro]\par
+\ul Aplicaci\'f3n/M\'f3dulo\ul0: [FI/CO/MM/SD/...]\par
+\ul Programa (ABAP)\ul0: [Z\_...\ \ \ (transacci\'f3n, si aplica)]\par
+\ul N\'famero de Dynpro\ul0: [0100]\par
+\ul Autor\ul0: [Nombre]\tab \ul Fecha\ul0: [AAAA-MM-DD]\par
+\pard\sb120\par
+
+\b 2. Resumen funcional\b0\par
+[Breve descripci\'f3n de qu\'e hace la pantalla, usuarios involucrados y frecuencia de uso.]\par
+\pard\sb120\par
+
+\b 3. Dise\'f1o de la pantalla\b0\par
+\ul Titulo (Titlebar)\ul0: [Texto]\par
+\ul Status GUI (SE41)\ul0: [Nombre]\tab \ul PF-Keys\ul0: [F1=Ayuda, F3=Back, F8=Ejecutar, ...]\par
+\ul Subscreens/Tabstrips\ul0: [Si aplica]\par
+\ul Controles especiales\ul0: [ALV, Tree, Textedit, etc.]\par
+\pard\sb120\par
+
+\b 4. Campos visibles\b0\par
+(Selecciona el bloque y convi\'e9rtelo en tabla en Word: \i Insertar > Tabla > Convertir texto en tabla\i0)\par
+\f1 Campo\tab Etiqueta (Texto)\tab Tipo\tab Long.\tab Oblig.\tab Ayuda(F1)\tab Validaciones\par
+---------\tab ------------------\tab ----\tab ----\tab ------\tab ----------\tab ------------\par
+[BUKRS]\tab [Sociedad]\tab [CHAR]\tab [4]\tab [S\'ed/No]\tab [Search Help]\tab [Reglas]\par
+[...]\par
+\f0\pard\sb120\par
+
+\b 5. Campos ocultos / variables de estado\b0\par
+[Listar campos no visibles que influyen en la l\'f3gica o navegaci\'f3n.]\par
+\pard\sb120\par
+
+\b 6. Elementos de interfaz (GUI)\b0\par
+\ul Botones/Toolbar\ul0:\par
+- [Bot\'f3n] \tab [Funci\'f3n]\tab [C\'f3digo de funci\'f3n]\par
+\ul Men\'fas\ul0:\par
+- [Ruta de men\'fa] \tab [Acci\'f3n]\par
+\pard\sb120\par
+
+\b 7. Flujo PBO/PAI (SE51)\b0\par
+\ul PBO (Process Before Output)\ul0:\par
+- M\'f3dulos: [MODULE xxx OUTPUT] \tab [Descripci\'f3n]\par
+- Orden de ejecuci\'f3n: [Lista]\par
+\ul PAI (Process After Input)\ul0:\par
+- M\'f3dulos: [MODULE yyy INPUT] \tab [Descripci\'f3n]\par
+- C\'f3digos de funci\'f3n gestionados: [BACK, EXIT, ...]\par
+\pard\sb120\par
+
+\b 8. Navegaci\'f3n y llamadas\b0\par
+- Transacciones origen/destino: [Desde XX a YY]\par
+- Dynpros llamados (CALL SCREEN): [0101, 0200, ...]\par
+- RFC/BAPI/Servicios OData: [Si aplica]\par
+\pard\sb120\par
+
+\b 9. Reglas de negocio\b0\par
+[Validaciones, c\'e1lculos, autorizaciones de negocio, dependencias entre campos.]\par
+\pard\sb120\par
+
+\b 10. Mensajes\b0\par
+\ul Clase\ul0: [ZMSG]\tab \ul Rangos\ul0: [001-050]\par
+- [E001] [Texto de error]\par
+- [S010] [Texto informativo]\par
+\pard\sb120\par
+
+\b 11. Autorizaciones\b0\par
+[Objetos (S\_TCODE, Z\_OBJ...), verificaciones AUTHORITY-CHECK, roles involucrados.]\par
+\pard\sb120\par
+
+\b 12. Rendimiento y volumetr\'eda\b0\par
+[Tama\'f1o de datos esperado, selecciones/joins, buffering, tiempos de respuesta.]\par
+\pard\sb120\par
+
+\b 13. Pruebas\b0\par
+\ul Casos de prueba\ul0:\par
+- ID: [TC\_001] \tab Descripci\'f3n: [Caso feliz]\tab Resultado esperado: [Resultado]\par
+- ID: [TC\_002] \tab Descripci\'f3n: [Validaci\'f3n]\tab Resultado esperado: [Mensaje]\par
+\ul Evidencias\ul0: [Pegar capturas abajo]\par
+\pard\sb120\par
+
+\b 14. Consideraciones t\'e9cnicas (ABAP)\b0\par
+- Includes/clases: [Lista]\par
+- MVOs/Tipificaciones: [Estructuras, tipos]\par
+- Exits/Enhancements/BAdIs: [Si aplica]\par
+- Naming y convenciones: [Est\'e1ndares del cliente]\par
+\pard\sb120\par
+
+\b 15. Anexos\b0\par
+- Estructura de pantallas (\'e1rbol SE80)\par
+- GUI Status (SE41) y Titlebar\par
+- Capturas de pantalla con numeraci\'f3n de campos\par
+\pard\sb120\par
+
+\pard\sb240\qc\i --- Fin del documento ---\i0\par
+}

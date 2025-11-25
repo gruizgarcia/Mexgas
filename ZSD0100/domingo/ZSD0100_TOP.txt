@@ -1,0 +1,351 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZEKA_MONITOR_TOP
+*&---------------------------------------------------------------------*
+INCLUDE RVADTABL.
+TABLES: ekko.
+*TABLES: nast. " Output status
+
+
+
+CONSTANTS:  c_log_objt    TYPE balobj_d    VALUE 'ZCFDI',
+            c_log_subobj  TYPE balsubobj   VALUE 'PROCESS',
+            cname_pdf     TYPE tnapr-sform VALUE 'ZSC_001_FACTURA_40'.
+
+" Constantes.
+CONSTANTS: gc_verde(4)       TYPE c VALUE '@08@',
+           gc_amarillo(4)    TYPE c VALUE '@09@',
+           gc_rojo(4)        TYPE c VALUE '@0A@',
+           gc_canc(4)        TYPE c VALUE '@0W@', "add 03.01.2022
+           gc_detalle(4)     TYPE c VALUE '@16@',
+           gc_color_a(4)     TYPE c VALUE 'C111',
+           gc_color_v(4)     TYPE c VALUE 'C500',
+           gc_bukrs          TYPE bukrs VALUE '0300',
+           gc_c_name(15)     TYPE c VALUE 'ALV_CONT',
+           gc_c_name2(15)    TYPE c VALUE 'ALV_CONT2',
+           gc_c_name0200(15) TYPE c VALUE 'ALV_CONT0200',
+           gc_c_name0300(15) TYPE c VALUE 'ALV_CONT0300',
+           gc_cxc(4)         TYPE c VALUE 'CXC',
+           gc_cxp(4)         TYPE c VALUE 'CXP',
+           gc_conta(6)       TYPE c VALUE 'CONTA',
+           gc_vis(3)         TYPE c VALUE 'VIS',
+           gc_supc(5)        TYPE c VALUE 'SUP-C',
+           gc_supp(5)        TYPE c VALUE 'SUP-P',
+           gc_pres(5)        TYPE c VALUE 'PRE_S',
+           lc_exten          TYPE string VALUE 'xlsx' ##NO_TEXT,
+           lc_dir            TYPE string VALUE 'C:\'.
+ DATA: lv_vbeln    TYPE vbeln_vf,            " Factura
+        lt_messages TYPE STANDARD TABLE OF bapiret1,
+        lo_logger   TYPE REF TO zcl_logger, " Mensajes
+        lv_kunag    TYPE kunag,   " variable para cliente  KRM
+        lv_kdkg1    TYPE kdkg1,   "Variable Clientes facturación terceros KRM
+        lv_katr4    TYPE katr4.   ""Variable  para determinar Versión CFDI cliente
+
+  DATA: sociedad     LIKE vbrk-bukrs,
+        sociedadtxt  TYPE string,
+        idiomas      TYPE checkbox,
+        facturatxt   TYPE vbeln,
+        asunto       TYPE string,
+        clasefactura TYPE fkart,
+        orgventas    TYPE vbrk-vkorg,
+        lf_retcode   TYPE sy-subrc,
+        v_erdat      TYPE vbrk-erdat,
+        lv_gjahr     TYPE ZCFDI4_MXDI_XML-gjahr.
+" Tipos
+TYPES: BEGIN OF ty_salida.
+         INCLUDE TYPE zst_alv_interfaz.
+         TYPES:   style TYPE lvc_t_styl,
+       END OF ty_salida,
+       BEGIN OF ty_salida2.
+         INCLUDE TYPE ztt_excel_info.
+         TYPES:   style                TYPE lvc_t_styl,
+         status_timbrado(4)   TYPE c,
+         mensaje_pac(22)      TYPE c,
+         datos_sap(4)         TYPE c,
+         itemno               TYPE i,
+         ekainvoicenumber(30) TYPE c,
+         folio(30)            TYPE c,
+         serie(30)            TYPE c,
+         uuid(36)             TYPE c,
+*         consec               TYPE i,
+       END OF ty_salida2,
+       BEGIN OF ty_index,
+         index TYPE i,
+       END OF ty_index,
+       BEGIN OF ty_tot,
+         tot TYPE string,
+       END OF ty_tot,
+       BEGIN OF ty_eod.
+         INCLUDE TYPE ztt_eod.
+         TYPES: datos_sap0200(4) TYPE c,
+       END OF ty_eod,
+       BEGIN OF ty_obj_key,
+         obj_key TYPE string,
+       END OF ty_obj_key,
+       BEGIN OF ty_archivo,
+         campo1  TYPE string,
+         campo2  TYPE string,
+         campo3  TYPE string,
+         campo4  TYPE string,
+         campo5  TYPE string,
+         campo6  TYPE string,
+         campo7  TYPE string,
+         campo8  TYPE string,
+         campo9  TYPE string,
+         campo10 TYPE string,
+         campo11 TYPE string,
+         campo12 TYPE string,
+         campo13 TYPE string,
+         campo14 TYPE string,
+         campo15 TYPE string,
+         campo16 TYPE string,
+         campo17 TYPE string,
+         campo18 TYPE string,
+         campo19 TYPE string,
+       END OF ty_archivo,
+       BEGIN OF ty_fact,
+         campo1  TYPE string,
+         campo2  TYPE string,
+         campo3  TYPE string,
+         campo4  TYPE string,
+         campo5  TYPE string,
+         campo6  TYPE string,
+         campo7  TYPE string,
+         campo8  TYPE string,
+         campo9  TYPE string,
+         campo10 TYPE string,
+         campo11 TYPE string,
+         campo12 TYPE string,
+         campo13 TYPE string,
+         campo14 TYPE string,
+         campo15 TYPE string,
+         campo16 TYPE string,
+         campo17 TYPE string,
+         campo18 TYPE string,
+         campo19 TYPE string,
+         campo20 TYPE string,
+         campo21 TYPE string,
+       END OF ty_fact.
+
+
+" Variables.
+DATA cl_app_log_dialog.
+DATA: gt_ekainfo           TYPE TABLE OF ztt_eka_info,
+      gt_excelinfo         TYPE TABLE OF ztt_excel_info,
+      gt_ekainfoitem       TYPE TABLE OF ztt_eka_infoitem,
+      gt_excelitem         TYPE TABLE OF ztt_excel_item,
+      gt_eka_op_eod        TYPE TABLE OF ztt_eka_op_eod,
+      gt_messtab           TYPE TABLE OF bdcmsgcoll,
+      gt_salida2           TYPE TABLE OF ty_salida2,
+      gt_salida            TYPE TABLE OF ty_salida,
+      it_fact              TYPE TABLE OF ztt_eka_op_eod,
+      it_fact2             TYPE TABLE OF ztt_eka_op_eod,
+      st_fact              TYPE ztt_eka_op_eod,
+      st_fact2             TYPE ztt_eka_op_eod,
+      gt_eod               TYPE TABLE OF ztt_eod,
+      gt_index             TYPE TABLE OF ty_index,
+      wa_index             TYPE ty_index,
+      gv_ind               TYPE i,
+      gv_contador          TYPE i,
+      gv_flag_autorizado   TYPE c,
+      gv_ans               TYPE c,
+      gt_selectedrow       TYPE lvc_t_row,
+      gt_fcat              TYPE TABLE OF lvc_s_fcat,
+      gt_fcat0101          TYPE TABLE OF lvc_s_fcat,
+      gt_fcat0200          TYPE TABLE OF lvc_s_fcat,
+      gt_fcat0300          TYPE TABLE OF lvc_s_fcat,
+      gt_salidaeod         TYPE TABLE OF ty_eod,
+      gt_fcatpiv           TYPE TABLE OF lvc_s_fcat,
+*      gt_detalle           TYPE TABLE OF zst_alv_interfaz_detalle,
+      gt_vbkpf             TYPE TABLE OF vbkpf,
+      gt_vbsegs            TYPE TABLE OF vbsegs,
+      wa_vbkpf             TYPE vbkpf,
+      wa_vbsegs            TYPE vbsegs,
+      gs_xml               TYPE zmonitorcfdi,
+      gs_layout            TYPE lvc_s_layo,
+      gs_layout0200        TYPE lvc_s_layo,
+      gs_layout0300        TYPE lvc_s_layo,
+      gv_pivekasap         TYPE c,
+      gv_tipo              TYPE ztipusr,
+      gv_zcldoc(2)         TYPE c,
+      gv_zshkzg            TYPE shkzg,
+      e_raw_data           TYPE truxs_t_text_data,
+      gv_file              TYPE fipdckw_checkrep-bounced_text, "rlgrap-filename, " JILP 261120
+      gv_piv               TYPE c,
+      gv_mat(30)           TYPE c,
+      gv_cont              TYPE i,
+      gv_contp             TYPE i,
+      gv_taxcheck          TYPE c,
+      gv_taxcode           TYPE mwskz,
+      gv_cgestor           TYPE fistl,
+      gv_tabix             TYPE i,
+      gv_bukrs             TYPE bukrs,
+      gv_doc_sap           TYPE bdcdata-fval,
+      gv_referencia        TYPE bdcdata-fval,
+      gv_sfolio            TYPE bdcdata-fval,
+      gv_serie             TYPE bdcdata-fval,
+      gv_folio2            TYPE bdcdata-fval,
+      gv_bukrs_cont        TYPE bdcdata-fval,
+      gv_fecha_cont        TYPE bdcdata-fval,
+      gv_akont             TYPE akont,
+      gv_fecha             TYPE datum,
+      gv_fechacont         TYPE datum,
+      gv_fecha_low         TYPE datum,
+      gv_fecha_high        TYPE datum,
+      gv_moneda            TYPE waers,
+      gv_subtotal          TYPE dmbtr,
+      gv_status            TYPE c,
+      gv_valunit(15)       TYPE p DECIMALS 6,
+      gv_cantmq(15)        TYPE p DECIMALS 6,
+      gv_cantidad          TYPE fkimg,
+      gv_doctyp(2)         TYPE c,
+      gt_archivo           TYPE TABLE OF ty_archivo,
+      gt_fact              TYPE TABLE OF ty_fact,
+      gs_fact              TYPE ty_fact,
+      gt_cabecera          TYPE TABLE OF ty_archivo,
+      gt_posicion          TYPE TABLE OF ty_archivo,
+      wa_archivo           TYPE ty_archivo,
+      wa_archivo2          TYPE ty_archivo,
+      gv_obj_key           TYPE bapiache09-obj_key,
+      gt_obj_key           TYPE TABLE OF ty_obj_key,
+      wa_obj_key           TYPE ty_obj_key,
+      gs_documentheader    TYPE bapiache09,
+      gt_accountreceivable TYPE TABLE OF bapiacar09,
+      wa_accountreceivable TYPE bapiacar09,
+      gt_accountgl         TYPE TABLE OF bapiacgl09,
+      wa_accountgl         TYPE bapiacgl09,
+      gt_accountpayable    TYPE TABLE OF bapiacap09,
+      wa_accountpayable    TYPE bapiacap09,
+      gt_accounttax        TYPE TABLE OF bapiactx09,
+      wa_accounttax        TYPE bapiactx09,
+      gt_currencyamount    TYPE TABLE OF bapiaccr09,
+      wa_currencyamount    TYPE bapiaccr09,
+      gt_return            TYPE STANDARD TABLE OF bapiret2,
+      gt_greturn           TYPE STANDARD TABLE OF bapiret2,
+      gv_statcheck         TYPE c,
+      gt_zequival          TYPE TABLE OF zequival,
+      gt_zfi_proceso       TYPE TABLE OF zfi_proceso,
+      wa_zfi_proceso       TYPE zfi_proceso,
+      wa_zequival          TYPE zequival,
+      wa_messtab           TYPE bdcmsgcoll,
+      wa_return            TYPE bapiret2,
+      gv_lifnr             TYPE lifnr,
+      gt_autorizador       TYPE TABLE OF ztt_autorizador,
+      wa_autorizador       TYPE ztt_autorizador,
+      gv_rfc               TYPE stcd1,
+      gv_rfc_e             TYPE paval,
+      gv_uuid(36)          TYPE c,
+      gv_usocfdi(3)        TYPE c,
+      gv_folio(6)          TYPE c,
+      gv_xml               TYPE zxml,
+      gv_count             TYPE i,
+      gt_total             TYPE TABLE OF ty_tot,
+      wa_total             TYPE ty_tot,
+      gv_flag              TYPE c,
+      gv_test              TYPE c,
+      gv_sel_monitor       TYPE c,
+      gv_buton2(8)         TYPE c,
+      gt_head_cfdi         TYPE ZST_HEAD_40,
+      wa_head_cfdi         TYPE ZCFDI_HEAD_40,
+      gt_det_cfdi          TYPE zst_det_mgs,
+      wa_det_cfdi          TYPE zcfdi_det_mgs,
+      gv_e_uuid            TYPE zuuid,
+      gv_e_uuidx           TYPE ZFID_UUID_CFDI,
+      gv_e_url             TYPE zqr40,
+      gv_e_error           TYPE string,
+      gt_tlbr_excl         TYPE ui_functions,
+      gv_ext(3)            TYPE c,
+      gv_url               TYPE char255,
+      gv_lines2            TYPE i,
+      gt_mwdat             TYPE TABLE OF rtax1u15,
+      wa_mwdat             TYPE rtax1u15.
+DATA: gtd_hex              TYPE STANDARD TABLE OF solix. " Mensaje de Correo
+DATA gv_ucomm TYPE sy-ucomm.
+
+DATA: lv_count  TYPE i,
+      gv_total  TYPE p DECIMALS 6,
+      gv_flagn  TYPE c,
+      gv_totalr TYPE p DECIMALS 6,
+      gv_totalf TYPE p DECIMALS 6,
+      gv_prctr  TYPE prctr,
+      gv_ex_glp TYPE c.
+
+" Estructuras.
+*DATA: wa_salida      TYPE zst_alv_interfaz,
+DATA: wa_salida      TYPE ty_salida,
+      wa_salida2     TYPE ty_salida2,
+      wa_eod         TYPE ztt_eod,
+      wa_salidaeod   TYPE ty_eod,
+      wa_ekainfo     TYPE ztt_eka_info,
+      wa_ekainfoitem TYPE ztt_eka_infoitem,
+      wa_excelinfo   TYPE ztt_excel_info,
+      wa_excelitem   TYPE ztt_excel_item,
+      wa_eka_op_eod  TYPE ztt_eka_op_eod,
+      wa_zcfdi_head  TYPE zcfdi_head_mgs,
+      wa_t001        TYPE t001,
+      wa_adrc        TYPE adrc,
+      gs_detalle     TYPE zst_alv_interfaz_detalle,
+      wa_style       TYPE lvc_s_styl.
+DATA: gs_asunto               TYPE sodocchgi1-obj_descr.    " Asunto de Correo
+DATA: gs_remitente            TYPE adr6-smtp_addr.          " Remitente de Correo
+DATA: gs_destinatario         TYPE adr6-smtp_addr.          " Destinatario de Correo
+DATA: gs_xhtml                TYPE xstring.                 " Mensaje Formato XString
+DATA: gs_html                 TYPE string.                  " Mensaje Formato String
+DATA: gs_address              TYPE bapiaddr3.
+
+" Objetos.
+
+DATA: go_alvgrid        TYPE REF TO cl_gui_alv_grid,
+      go_alvgrid0101    TYPE REF TO cl_gui_alv_grid,
+      go_alvgrid0200    TYPE REF TO cl_gui_alv_grid,
+      go_alvgrid0300    TYPE REF TO cl_gui_alv_grid,
+      go_ccontainer     TYPE REF TO cl_gui_custom_container,
+      go_ccontainer0101 TYPE REF TO cl_gui_custom_container,
+      go_ccontainer0200 TYPE REF TO cl_gui_custom_container,
+      go_ccontainer0300 TYPE REF TO cl_gui_custom_container.
+DATA: lcl_send_request        TYPE REF TO cl_bcs.
+DATA: lcl_remitente           TYPE REF TO cl_cam_address_bcs.
+DATA: lcl_document            TYPE REF TO cl_document_bcs.
+DATA: lcx_bcs_exception       TYPE REF TO cx_bcs.
+DATA: lcl_receptor            TYPE REF TO cl_cam_address_bcs.
+
+****************************************************************************
+**     INICIA Modificacion Migracion CFDI 4.0 - MAM 01.06.2022
+****************************************************************************
+DATA gt_parametros TYPE STANDARD TABLE OF zsulp_params.
+****************************************************************************
+**     FIN Modificacion Migracion CFDI 4.0 - MAM 01.06.2022
+****************************************************************************
+
+Data :
+        gs_header_printvw Type VBDKR,
+        gt_positions_printvw Type TBL_VBDPR,
+        gt_pos_price_cond Type KOMV_TAB,
+        gt_partners Type VBPA_TAB,
+        GT_POSITIONS Type VBRP_TAB,
+        gs_Header Type VBRKVB.
+
+DATA:
+lt_header TYPE vbrk_tab,  " Facturas: Datos de cabecera
+        ls_vbco3  TYPE vbco3,     " Campos clave acceso documento comercial: Impresión documento
+        ls_vbrk   TYPE vbrk.      " Factura: Datos de cabecera
+
+
+DATA:
+      it_pdf      TYPE solix_tab,
+
+      v_filename  TYPE string,
+      Factura_swo TYPE SWO_TYPEID,
+      TipoFactura Type SNA_KSCHL.
+
+Data :
+        it_factura TYPE STANDARD TABLE OF  zcfdi_head_40.
+
+DATA:   RETCODE   LIKE SY-SUBRC.         "Returncode
+
+DATA:   XSCREEN(1) TYPE C.               "Output on printer or screen
+DATA:   REPEAT(1) TYPE C.
+DATA: NAST_ANZAL LIKE NAST-ANZAL.      "Number of outputs (Orig. + Cop.)
+DATA: NAST_TDARMOD LIKE NAST-TDARMOD.  "Archiving only one time
+
+* current language for read buffered..
+DATA: GF_LANGUAGE LIKE SY-LANGU.

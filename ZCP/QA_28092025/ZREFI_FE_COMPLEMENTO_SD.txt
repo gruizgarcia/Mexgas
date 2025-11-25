@@ -1,0 +1,161 @@
+
+*----------------------------------------------------------------------*
+*----------------------------------------------------------------------*
+*                      I N F O T I P O S                               *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                        T A B L A S                                   *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                         T I P O S                                    *
+*----------------------------------------------------------------------*
+  TYPES:
+    BEGIN OF ty_vbrk,
+      vbeln TYPE vbrk-vbeln, "2
+      kunag TYPE vbrk-kunag, "10
+      zterm TYPE vbrk-zterm, "28 Clave de condiciones de pago
+      bukrs TYPE vbrk-bukrs, "36
+    END OF ty_vbrk,
+
+    BEGIN OF ty_vbkd,
+      vbeln TYPE vbkd-vbeln,
+      zterm TYPE vbkd-zterm,
+    END OF ty_vbkd,
+
+    BEGIN OF ty_t001z,
+      bukrs TYPE t001z-bukrs,
+      party TYPE t001z-party,
+      paval TYPE t001z-paval,
+    END OF ty_t001z,
+
+    BEGIN OF ty_t001,
+      bukrs TYPE t001-bukrs,
+      butxt TYPE t001-butxt,
+      adrnr TYPE t001-adrnr,
+    END OF ty_t001,
+
+    BEGIN OF ty_adrc,
+      addrnumber TYPE adrc-addrnumber,
+      date_from  TYPE adrc-date_from,
+      nation     TYPE adrc-nation,
+      city1      TYPE ad_city1,          "WLECEA
+      city2      TYPE ad_city2,          "WLECEA
+      post_code1 TYPE adrc-post_code1,
+      street     TYPE adrc-street,
+      house_num1 TYPE adrc-house_num1,
+      house_num2 TYPE ad_hsnm2,         "WLECEA
+      str_suppl1 TYPE ad_strspp1,       "WLECEA
+      country    TYPE adrc-country,
+      region     TYPE adrc-region,
+    END OF ty_adrc,
+
+    BEGIN OF ty_kna1,
+      kunnr TYPE kna1-kunnr,
+      land1 TYPE kna1-land1,
+      name1 TYPE kna1-name1,
+      name2 TYPE kna1-name2,
+      regio TYPE kna1-regio,
+      stras TYPE kna1-stras,
+      adrnr TYPE kna1-adrnr,   "WLECEA
+      stcd1 TYPE kna1-stcd1,
+      stceg TYPE kna1-stceg,
+      pstlz TYPE kna1-pstlz, "CP 2.0 dnavoa 21.07.22 (Se necesita el codigo postal del rr)
+    END OF ty_kna1,
+
+    BEGIN OF ty_t005u,
+      spras TYPE t005u-spras,
+      land1 TYPE t005u-land1,
+      bland TYPE t005u-bland,
+      bezei TYPE t005u-bezei,
+    END OF ty_t005u,
+
+    BEGIN OF ty_t005t,
+      spras TYPE t005t-spras,
+      land1 TYPE t005t-land1,
+      landx TYPE t005t-landx,
+    END OF ty_t005t.
+
+  TYPES:
+    BEGIN OF ty_factura_012,
+      bukrs          TYPE zsdt_factura_012-bukrs,
+      regimen_fiscal TYPE zsdt_factura_012-regimen_fiscal,
+    END OF ty_factura_012,
+
+    BEGIN OF ty_factura_017,
+      kunnr   TYPE ZCFDI_HEAD_40-kunnr,
+      usocfdi TYPE ZCFDI_HEAD_40-uso_cfdi,
+    END OF ty_factura_017,
+
+    BEGIN OF ty_bkpf_sd,
+      bukrs TYPE bkpf-bukrs,
+      belnr TYPE bkpf-belnr,
+      gjahr TYPE bkpf-gjahr,
+      awtyp TYPE bkpf-awtyp,
+      awkey TYPE bkpf-awkey,
+    END OF ty_bkpf_sd,
+
+*    BEGIN OF ty_vbrk,
+*      vbeln TYPE vbrk-vbeln,
+*      zterm TYPE vbrk-zterm,
+*    END OF ty_vbrk.
+
+    BEGIN OF ty_vbeln,
+      vbeln TYPE vbrk-vbeln,
+    END OF ty_vbeln,
+
+    BEGIN OF ty_factura_010,
+      land1       TYPE zsdt_factura_010-land1,
+      land1_sat   TYPE zsdt_factura_010-zpais,
+      descripcion TYPE zsdt_factura_010-zdescripcion,
+    END OF ty_factura_010.
+
+*----------------------------------------------------------------------*
+*                      C O N S T A N T E S                             *
+*----------------------------------------------------------------------*
+  CONSTANTS: c_mx_rfc(6) TYPE c VALUE 'MX_RFC',
+             c_es(2)     TYPE c VALUE 'ES',
+             c_mx(2)     TYPE c VALUE 'MX'.
+
+*----------------------------------------------------------------------*
+*                      E S T R U C T U R A S                           *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                  T A B L A S  I N T E R N A S                        *
+*----------------------------------------------------------------------*
+  DATA: t_vbrk     TYPE TABLE OF ty_vbrk,
+        t_bkpf_sd  TYPE TABLE OF ty_bkpf_sd,
+        t_t001z    TYPE TABLE OF ty_t001z,
+        t_t001     TYPE TABLE OF ty_t001,
+        t_adrc     TYPE TABLE OF ty_adrc,
+*        t_lugexp   TYPE TABLE OF zta1_lugexp,
+        t_kna1     TYPE TABLE OF ty_kna1,
+        t_t005u    TYPE TABLE OF ty_t005u,
+        t_payterms TYPE TABLE OF cfdi_payterms,
+        t_t005t    TYPE TABLE OF ty_t005t.
+
+  DATA: t_factura_012 TYPE TABLE OF ty_factura_012,
+        t_factura_017 TYPE TABLE OF ty_factura_017,
+        t_factura_010 TYPE TABLE OF ty_factura_010.
+
+*----------------------------------------------------------------------*
+*                          R A N G O S                                 *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                      F I E L D - S Y M B O L S                       *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                      V A R I A B L E S                               *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                       C L A S E S                                    *
+*----------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+*                     P A R A M E T R O S                              *
+*----------------------------------------------------------------------*

@@ -1,0 +1,150 @@
+  METHOD build_cabecera.
+
+    DATA: lv_attr        TYPE string,
+          lv_fecha       TYPE string,
+          lv_metpag      TYPE string,
+          lv_usocfdi     TYPE string,
+          lv_nombre      TYPE string,
+          lv_regfiscal   TYPE string,
+          lv_domfiscal   TYPE string,
+          lv_exportacion TYPE string,    " >>> default 01 si vacío
+          lv_tc_str      TYPE string,    " >>> TipoCambio condicional
+          lv_cp_emisor   TYPE adrc-post_code1,
+          lv_formapago   TYPE string.  " >>> CP emisor desde ADRC (T001)
+
+
+
+    CLEAR lv_attr.
+
+    " Fecha CFDI 4.0 → AAAA-MM-DDThh:mm:ss
+    lv_fecha = |{ sy-datum+0(4) }-{ sy-datum+4(2) }-{ sy-datum+6(2) }T{ sy-uzeit+0(2) }:{ sy-uzeit+2(2) }:{ sy-uzeit+4(2) }|.
+
+    " Trae datos del receptor (como ya lo hacías)
+    me->recuperar_datos_cfdi_receptor(
+      EXPORTING
+        iv_kunnr     = is_head-kunnr
+      IMPORTING
+        ev_metpag    = lv_metpag
+        ev_usocfdi   = lv_usocfdi
+        ev_nombre    = lv_nombre
+        ev_regfiscal = lv_regfiscal
+        ev_domfiscal = lv_domfiscal
+        ev_formapago = lv_formapago
+    ).
+
+    " >>> Exportacion: requerido en 4.0; si no aplica, '01'
+    lv_exportacion = COND string( WHEN is_head-exportacion IS INITIAL
+                                  THEN '01'
+                                  ELSE CONV string( is_head-exportacion ) ).
+
+    " >>> LugarExpedicion: tomar CP emisor desde T001->ADRC si es posible
+    CLEAR lv_cp_emisor.
+    IF is_head-bukrs IS NOT INITIAL.
+      SELECT SINGLE a~post_code1
+        INTO lv_cp_emisor
+        FROM t001 AS t
+        INNER JOIN adrc AS a ON a~addrnumber = t~adrnr
+        WHERE t~bukrs = is_head-bukrs.
+    ENDIF.
+
+    " Fallback a lo que venga en is_head-lugar_exp si no se encontró en ADRC
+    IF lv_cp_emisor IS INITIAL.
+      lv_cp_emisor = CONV adrc-post_code1( is_head-lugar_exp ).
+    ENDIF.
+
+    " Normaliza a 5 dígitos numéricos (requisito SAT)
+    REPLACE ALL OCCURRENCES OF REGEX '[^0-9]' IN lv_cp_emisor WITH ''.
+    IF strlen( lv_cp_emisor ) = 4.
+      lv_cp_emisor = |0{ lv_cp_emisor }|.
+    ELSEIF strlen( lv_cp_emisor ) > 5.
+      " Si excede, toma los PRIMEROS 5 (evita casos como 011320)
+      lv_cp_emisor = lv_cp_emisor(5).
+    ENDIF.
+
+    " >>> TipoCambio: si Moneda = MXN, omitir; si ≠ MXN, informar
+    CLEAR lv_tc_str.
+    IF is_head-waers = 'MXN'.
+      " Opción B: si tu generador exige llenarlo, usa exactamente '1'
+      " lv_tc_str = '1'.
+    ELSE.
+      lv_tc_str = |{ is_head-tipo_cambio DECIMALS = 6 }|.
+    ENDIF.
+
+    " --- Nombre emisor ---
+    DATA lv_nom_emisor TYPE string.
+
+    lv_nom_emisor = me->get_param_value(
+                             iv_program = 'ZCFDI40_MONITOR_LOG'
+                             iv_param   = 'EMISOR'
+                             iv_field   = 'NOMBRE'
+                             iv_bukrs   = is_head-bukrs ).
+
+    IF lv_nom_emisor IS INITIAL.
+      SELECT SINGLE butxt INTO lv_nom_emisor
+        FROM t001
+        WHERE bukrs = is_head-bukrs.
+    ENDIF.
+
+
+
+    " FormaPago: solo cuando MetodoPago = 'PUE' y tenga valor
+    IF lv_formapago = 'PUE' AND lv_formapago IS NOT INITIAL.  " <-- ajusta el nombre del campo si difiere
+      me->add_attr( EXPORTING i_name = 'FormaPago' i_val  = lv_formapago CHANGING  cv_attr = lv_attr ).
+    ENDIF.
+
+
+
+
+
+    " Atributos del nodo <cfdi:Comprobante>
+    me->add_attr( EXPORTING i_name = 'xsi:schemaLocation'
+                            i_val  = 'http://www.sat.gob.mx/cfd/4 http://www.sat.gob.mx/sitio_internet/cfd/4/cfdv40.xsd'
+                            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'xmlns:xsi'         i_val = 'http://www.w3.org/2001/XMLSchema-instance' CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'xmlns:cfdi'        i_val = 'http://www.sat.gob.mx/cfd/4'                CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Fecha'             i_val = lv_fecha                                    CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'MetodoPago'        i_val = CONV string( is_head-metodo_pago )          CHANGING cv_attr = lv_attr ).
+
+    " >>> Exportacion (siempre, con default 01 ya aplicado)
+    me->add_attr( EXPORTING i_name = 'Exportacion'       i_val = lv_exportacion                              CHANGING cv_attr = lv_attr ).
+
+    me->add_attr( EXPORTING i_name = 'TipoDeComprobante' i_val = CONV string( is_head-tipo_comp )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Serie'             i_val = CONV string( is_head-serie_xml )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Folio'             i_val = CONV string( is_head-folio_xml )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'SubTotal'          i_val = |{ is_head-subtotal DECIMALS = 2 }|         CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Total'             i_val = |{ is_head-total DECIMALS = 2 }|            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Moneda'            i_val = CONV string( is_head-waers )                CHANGING cv_attr = lv_attr ).
+
+    " >>> TipoCambio: agrega SOLO si procede
+    IF lv_tc_str IS NOT INITIAL.
+      me->add_attr( EXPORTING i_name = 'TipoCambio'      i_val = lv_tc_str                                   CHANGING cv_attr = lv_attr ).
+    ENDIF.
+
+    " >>> LugarExpedicion normalizado a 5 dígitos
+    me->add_attr( EXPORTING i_name = 'LugarExpedicion'   i_val = CONV string( lv_cp_emisor )                 CHANGING cv_attr = lv_attr ).
+
+    me->add_attr( EXPORTING i_name = 'Version'           i_val = '4.0'                                       CHANGING cv_attr = lv_attr ).
+
+    " Abrir nodo <cfdi:Comprobante>
+    me->append_line( EXPORTING iv_line = |<cfdi:Comprobante { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+
+    " Nodo <cfdi:Emisor>
+    CLEAR lv_attr.
+    " >>> IMPORTANTE: Nombre del emisor DEBE ser idéntico al registrado en el SAT para evitar CFDI40139
+    me->add_attr( EXPORTING i_name = 'Nombre'        i_val = CONV string( lv_nom_emisor )  CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Rfc'           i_val = CONV string( is_head-rfc_emisor )     CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'RegimenFiscal' i_val = CONV string( is_head-regimen_fiscal ) CHANGING cv_attr = lv_attr ).
+    me->append_line( EXPORTING iv_line = |<cfdi:Emisor { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+    me->append_line( EXPORTING iv_line = '</cfdi:Emisor>' CHANGING ct_xml = ct_xml ).
+
+    " Nodo <cfdi:Receptor>
+    CLEAR lv_attr.
+    me->add_attr( EXPORTING i_name = 'Nombre'                   i_val = lv_nombre                         CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Rfc'                      i_val = CONV string( is_head-rfc_receptor ) CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'RegimenFiscalReceptor'    i_val = lv_regfiscal                      CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'DomicilioFiscalReceptor'  i_val = lv_domfiscal                      CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'UsoCFDI'                  i_val = lv_usocfdi                        CHANGING cv_attr = lv_attr ).
+    me->append_line( EXPORTING iv_line = |<cfdi:Receptor { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+    me->append_line( EXPORTING iv_line = '</cfdi:Receptor>' CHANGING ct_xml = ct_xml ).
+
+  ENDMETHOD.

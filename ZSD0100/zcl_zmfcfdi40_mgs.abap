@@ -1,0 +1,1563 @@
+CLASS zcl_zmfcfdi40_mgs DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC.
+
+  PUBLIC SECTION.
+    INTERFACES if_oo_adt_classrun.
+
+    "==== Tipos públicos (longitudes explícitas) ====
+    TYPES: BEGIN OF ty_head,
+             tipo_comp       TYPE c LENGTH 1,
+             bukrs           TYPE bukrs,
+             belnr           TYPE vbeln_vf,
+             bldat           TYPE sydatum,
+             gjahr           TYPE gjahr,
+             tipo_doc        TYPE blart,
+             uzeit           TYPE syuzeit,
+             lugar_exp       TYPE ad_pstcd1,
+             total           TYPE wrbtr,
+             waers           TYPE waers,
+             total_iva       TYPE wrbtr,
+             subtotal        TYPE wrbtr,
+             version         TYPE c LENGTH 3,
+             regimen_fiscal  TYPE c LENGTH 3,
+             kunnr           TYPE kunnr,
+             nombre_emisor   TYPE butxt,
+             rfc_emisor      TYPE stcd1,
+             nombre_receptor TYPE ad_name1,
+             rfc_receptor    TYPE stcd1,
+             factura         TYPE vbeln_vf,
+             uso_cfdi        TYPE c LENGTH 4,
+             vkorg           TYPE vkorg,
+             vtweg           TYPE vtweg,
+             spart           TYPE spart,
+             tipo_cambio     TYPE ukurs,
+             relac           TYPE abap_bool,
+             uuid_relac      TYPE c LENGTH 36,
+           END OF ty_head.
+    TYPES tt_head TYPE STANDARD TABLE OF ty_head WITH DEFAULT KEY.
+
+    TYPES: BEGIN OF ty_det,
+             bukrs           TYPE bukrs,
+             belnr           TYPE vbeln_vf,
+             gjahr           TYPE gjahr,
+             dmbtr           TYPE wrbtr,
+             valor_unit      TYPE wrbtr,
+             descripcion     TYPE string,
+             clave_unidad    TYPE string,
+             cantidad        TYPE p LENGTH 16 DECIMALS 3,
+             clave_prod_serv TYPE string,
+             prod_eka        TYPE matnr,
+             importe_iva     TYPE wrbtr,
+           END OF ty_det.
+    TYPES tt_det TYPE STANDARD TABLE OF ty_det WITH DEFAULT KEY.
+
+    TYPES: ty_c1    TYPE c LENGTH 1,
+           ty_curr  TYPE p LENGTH 16 DECIMALS 2,
+           ty_p10   TYPE p LENGTH 16 DECIMALS 10,
+           ty_p14   TYPE p LENGTH 16 DECIMALS 14,
+           ty_char3 TYPE c LENGTH 3.
+
+    DATA mv_form_prog TYPE progname.
+
+    "==== Constructor ====
+    METHODS constructor
+      IMPORTING iv_form_prog TYPE progname DEFAULT 'ZSD0100'.
+
+    "==== Orquestación de timbrado ====
+    METHODS timbrar
+      IMPORTING
+        t_head_cfdi     TYPE tt_head
+        t_det_cfdi      TYPE tt_det
+        i_addenda       TYPE ty_c1
+        i_pedido        TYPE vbeln_va
+        iv_fix_importes TYPE abap_bool DEFAULT abap_true
+        iv_fix_fecha    TYPE abap_bool DEFAULT abap_true
+      EXPORTING
+        e_uuid          TYPE zuuid
+        e_error         TYPE string
+        e_url           TYPE zqr40
+      CHANGING
+        po_logger       TYPE REF TO zcl_logger.
+
+    "==== Obtener datos de factura (cabecera/detalle) ====
+    METHODS get_data_factura
+      IMPORTING
+        iv_vbeln     TYPE vbeln_vf
+        iv_fechadoc  TYPE sydatum
+      EXPORTING
+        ct_head_cfdi TYPE tt_head
+        ct_det_cfdi  TYPE tt_det
+        ev_vgjahr    TYPE gjahr
+        ev_error     TYPE string.
+
+    "==== Obtener pedido de venta base y datos asociados ====
+    METHODS llena_tabla_principal_fm
+      IMPORTING
+        iv_vbeln             TYPE vbeln_vf
+      EXPORTING
+        ev_first_sales_order TYPE vbeln_va
+        ev_collect_positions TYPE vbkd-mrnkz
+        ev_purchase_no       TYPE vbkd-bstkd
+        ev_error             TYPE string.
+
+    "==== Adjuntos GOS ====
+    METHODS anexa_factura_gos
+      IMPORTING
+        iv_factura     TYPE vbeln_vf
+        iv_archivo     TYPE string
+        iv_descripcion TYPE so_obj_des
+        iv_servidor    TYPE checkbox DEFAULT space
+        it_pdf         TYPE solix_tab OPTIONAL
+      CHANGING
+        po_logger      TYPE REF TO zcl_logger.
+
+    METHODS anexa_xml_gos
+      IMPORTING
+        iv_factura     TYPE vbeln_vf
+        iv_descripcion TYPE so_obj_des
+      CHANGING
+        po_logger      TYPE REF TO zcl_logger.
+
+    METHODS attach_gos
+      IMPORTING
+        iv_vbeln TYPE zcfdi_head_40-belnr
+        iv_bukrs TYPE bukrs
+        iv_gjahr TYPE gjahr
+        iv_xml   TYPE xstring
+      EXPORTING
+        ev_qr    TYPE zqr40
+      CHANGING
+        cs_head  TYPE zcfdi_head_40.
+
+    METHODS zfi_update_text
+      IMPORTING
+        iv_belnr    TYPE zfid_noper
+        iv_gjahr    TYPE gjahr
+        iv_bukrs    TYPE bukrs
+        iv_uuid     TYPE zfid_uuid_cfdi
+        iv_tdobject TYPE tdobject OPTIONAL
+      EXPORTING
+        ev_success  TYPE flag
+        ev_message  TYPE string.
+
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+    " XML helpers
+    DATA: mr_ixml TYPE REF TO if_ixml,
+          mr_doc  TYPE REF TO if_ixml_document,
+          mr_comp TYPE REF TO if_ixml_element.
+
+    METHODS ixml_init.
+    METHODS currency_decimals
+      IMPORTING iv_waers      TYPE waers
+      RETURNING VALUE(rv_dec) TYPE i.
+    METHODS round_half_up
+      IMPORTING iv_val TYPE ty_p14 iv_dec TYPE i
+      RETURNING VALUE(rv_val) TYPE ty_p14.
+    METHODS set_attr
+      IMPORTING node  TYPE REF TO if_ixml_element
+                name  TYPE string
+                value TYPE any.
+    METHODS to_str
+      IMPORTING iv_val TYPE ty_p14 iv_dec TYPE i
+      RETURNING VALUE(rv_str) TYPE string.
+    METHODS render_to_string
+      IMPORTING io_doc TYPE REF TO if_ixml_document
+      EXPORTING ev_xml TYPE string.
+    METHODS build_header
+      IMPORTING is_head TYPE zcfdi_head_40 iv_fix_fecha TYPE abap_bool
+      CHANGING  cv_uso_cfdi TYPE ty_char3.
+    METHODS build_emisor   IMPORTING is_head TYPE zcfdi_head_40.
+    METHODS build_receptor IMPORTING is_head TYPE zcfdi_head_40.
+    METHODS build_conceptos
+      IMPORTING is_head       TYPE zcfdi_head_40
+                it_det        TYPE tt_det
+                iv_ver        TYPE abap_bool
+                iv_fix_import TYPE abap_bool
+      CHANGING  cv_subtotal   TYPE ty_curr.
+    METHODS build_impuestos
+      IMPORTING is_head TYPE zcfdi_head_40 iv_subtotal TYPE ty_curr.
+    METHODS build_custom_data
+      IMPORTING is_head       TYPE zcfdi_head_40
+                it_det        TYPE zcl_zmfcfdi40_mgs=>tt_det
+      EXPORTING ev_dom_string TYPE string
+                ev_dat_string TYPE string.
+
+
+    METHODS send_to_pac
+      IMPORTING is_head TYPE zcfdi_head_40 iv_xml TYPE string iv_dom TYPE string iv_dat TYPE string
+      EXPORTING es_output TYPE string ev_error_s TYPE string ev_is_prod TYPE abap_bool.
+    METHODS parse_pac_output
+      IMPORTING iv_output TYPE string
+      EXPORTING ev_uuid TYPE zuuid ev_cad TYPE string ev_ft TYPE string ev_xmlx TYPE xstring ev_url TYPE zqr40 ev_error TYPE string.
+    METHODS maybe_addenda
+      IMPORTING is_head TYPE zcfdi_head_40 i_addenda TYPE ty_c1.
+    METHODS get_version40
+      IMPORTING is_head       TYPE ty_head
+      RETURNING VALUE(rv_v40) TYPE abap_bool.
+
+ENDCLASS.
+
+
+
+CLASS ZCL_ZMFCFDI40_MGS IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->ANEXA_FACTURA_GOS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_FACTURA                     TYPE        VBELN_VF
+* | [--->] IV_ARCHIVO                     TYPE        STRING
+* | [--->] IV_DESCRIPCION                 TYPE        SO_OBJ_DES
+* | [--->] IV_SERVIDOR                    TYPE        CHECKBOX (default =SPACE)
+* | [--->] IT_PDF                         TYPE        SOLIX_TAB(optional)
+* | [<-->] PO_LOGGER                      TYPE REF TO ZCL_LOGGER
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD anexa_factura_gos.
+    DATA: p_type      TYPE swo_objtyp VALUE 'VBRK',
+          p_key       TYPE swo_typeid,
+          p_file      TYPE c LENGTH 255,
+          p_desc      TYPE so_obj_des,
+          ls_fol_id   TYPE soodk,
+          ls_obj_id   TYPE soodk,
+          ls_obj_data TYPE sood1,
+          ls_folmem_k TYPE sofmk,
+          ls_note     TYPE borident,
+          ls_object   TYPE borident,
+          lv_ep_note  TYPE borident-objkey,
+          lv_offset   TYPE i,
+          it_objhead  TYPE STANDARD TABLE OF soli,
+          it_content  TYPE soli_tab,
+          it_content2 TYPE solix_tab,
+          wa_content  TYPE soli,
+          lv_len      TYPE i.
+
+    p_key  = iv_factura.
+    p_file = iv_archivo.
+    p_desc = iv_descripcion.
+
+    ls_object-objkey  = p_key.
+    ls_object-objtype = p_type.
+
+    IF iv_servidor = 'X'.
+      TRY.
+          OPEN DATASET p_file FOR INPUT IN BINARY MODE.
+          WHILE sy-subrc = 0.
+            READ DATASET p_file INTO wa_content.
+            IF sy-subrc = 0.
+              APPEND wa_content TO it_content.
+            ENDIF.
+          ENDWHILE.
+          CLOSE DATASET p_file.
+        CATCH cx_sy_file_access_error.
+          IF po_logger IS BOUND.
+            po_logger->add_message(
+              EXPORTING
+                iv_msgty = 'E'          " Tipo de mensaje: E = Error, W = Warning, etc.
+                iv_msgid = 'ZCFDI'      " ID del mensaje (catálogo)
+                iv_msgno = '001'        " Número del mensaje
+                iv_msgv1 = 'Eror archivo open datase' ). " Texto dinámico del mensaje
+          ENDIF.
+          RETURN.
+      ENDTRY.
+    ELSE.
+      IF it_pdf IS INITIAL.
+        IF po_logger IS BOUND.
+          po_logger->add_message( EXPORTING iv_msgty = 'E' iv_msgid = 'ZCFDI_40' iv_msgno = '001'
+                                  iv_msgv1 = 'IT_PDF vacío (se esperaba contenido PDF en SOLIX_TAB)' ).
+        ENDIF.
+        RETURN.
+      ENDIF.
+      it_content2 = it_pdf.
+      CALL FUNCTION 'SO_SOLIXTAB_TO_SOLITAB' EXPORTING ip_solixtab = it_content2 IMPORTING ep_solitab = it_content.
+    ENDIF.
+
+    CALL FUNCTION 'SO_CONVERT_CONTENTS_BIN'
+      EXPORTING
+        it_contents_bin = it_content[]
+      IMPORTING
+        et_contents_bin = it_content[].
+
+    CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET' EXPORTING region = 'B' IMPORTING folder_id = ls_fol_id.
+    IF sy-subrc <> 0.
+      IF po_logger IS BOUND.
+        po_logger->add_message( EXPORTING iv_msgty = 'E' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 ='No se pudo obtener carpeta Business Documents (SO_FOLDER_ROOT_ID_GET).' ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    ls_obj_data-objsns = 'O'.
+    ls_obj_data-objla  = sy-langu.
+    ls_obj_data-objdes = p_desc.
+    IF p_file IS INITIAL OR strlen( p_file ) < 3.
+      ls_obj_data-file_ext = 'PDF'.
+    ELSE.
+      lv_offset            = strlen( p_file ) - 3.
+      ls_obj_data-file_ext = p_file+lv_offset(3).
+    ENDIF.
+
+    lv_len = lines( it_content ) * 510.
+    ls_obj_data-objlen = lv_len.
+
+    CALL FUNCTION 'SO_OBJECT_INSERT'
+      EXPORTING
+        folder_id        = ls_fol_id
+        object_type      = 'EXT'
+        object_hd_change = ls_obj_data
+      IMPORTING
+        object_id        = ls_obj_id
+      TABLES
+        objhead          = it_objhead
+        objcont          = it_content.
+    IF sy-subrc <> 0.
+      IF po_logger IS BOUND.
+        po_logger->add_message( EXPORTING iv_msgty ='E' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 ='Error al insertar objeto en SAPoffice (SO_OBJECT_INSERT).' ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    ls_folmem_k-foltp = ls_fol_id-objtp.
+    ls_folmem_k-folyr = ls_fol_id-objyr.
+    ls_folmem_k-folno = ls_fol_id-objno.
+    ls_folmem_k-doctp = ls_obj_id-objtp.
+    ls_folmem_k-docyr = ls_obj_id-objyr.
+    ls_folmem_k-docno = ls_obj_id-objno.
+    lv_ep_note        = ls_folmem_k.
+
+    ls_note-objtype = 'MESSAGE'.
+    ls_note-objkey  = lv_ep_note.
+
+    CALL FUNCTION 'BINARY_RELATION_CREATE'
+      EXPORTING
+        obj_rolea    = ls_object
+        obj_roleb    = ls_note
+        relationtype = 'ATTA'.
+
+    IF po_logger IS BOUND.
+      IF sy-subrc = 0.
+        po_logger->add_message( EXPORTING iv_msgty ='S' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 = |Archivo anexado exitosamente a factura { iv_factura }| ).
+      ELSE.
+        po_logger->add_message( EXPORTING iv_msgty = 'E' iv_msgid = 'ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 = 'Error al crear relación ATTA (BINARY_RELATION_CREATE).' ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->ANEXA_XML_GOS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_FACTURA                     TYPE        VBELN_VF
+* | [--->] IV_DESCRIPCION                 TYPE        SO_OBJ_DES
+* | [<-->] PO_LOGGER                      TYPE REF TO ZCL_LOGGER
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD anexa_xml_gos.
+    DATA: p_type      TYPE swo_objtyp VALUE 'VBRK',
+          p_key       TYPE swo_typeid,
+          p_file      TYPE c LENGTH 100,
+          p_desc      TYPE so_obj_des,
+          ls_fol_id   TYPE soodk,
+          ls_obj_id   TYPE soodk,
+          ls_obj_data TYPE sood1,
+          ls_folmem_k TYPE sofmk,
+          ls_note     TYPE borident,
+          ls_object   TYPE borident,
+          lv_ep_note  TYPE borident-objkey,
+          lv_offset   TYPE i,
+          it_objhead  TYPE STANDARD TABLE OF soli,
+          it_content  TYPE soli_tab.
+    p_file = |Factura.xml|.
+
+    DATA ls_xml TYPE zcfdi_40_xml.
+    SELECT SINGLE * FROM zcfdi_40_xml INTO ls_xml WHERE factura = iv_factura.
+    IF sy-subrc <> 0 OR ls_xml-xml IS INITIAL.
+      IF po_logger IS BOUND.
+        po_logger->add_message( EXPORTING iv_msgty ='E' iv_msgid = 'ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 = |No se encontró XML para factura { iv_factura } en ZCFDI_40_XML| ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION 'SO_STRING_TO_TAB' EXPORTING content_str = ls_xml-xml TABLES content_tab = it_content[].
+
+    CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET' EXPORTING region ='B' IMPORTING folder_id = ls_fol_id.
+    IF sy-subrc <> 0.
+      IF po_logger IS BOUND.
+        po_logger->add_message( iv_msgty ='E' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 ='No se pudo obtener carpeta Business Documents (SO_FOLDER_ROOT_ID_GET).' ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    ls_obj_data-objsns   = 'O'.
+    ls_obj_data-objla    = sy-langu.
+    ls_obj_data-objdes   = |{ iv_descripcion } XML|.
+    lv_offset            = strlen( p_file ) - 3.
+    DATA lv_ext TYPE c LENGTH 3.
+    IF lv_offset GE 0. lv_ext = p_file+lv_offset(3). ELSE. lv_ext = 'XML'. ENDIF.
+    ls_obj_data-file_ext = lv_ext.
+    ls_obj_data-objlen   = lines( it_content ) * 510.
+
+    CALL FUNCTION 'SO_OBJECT_INSERT'
+      EXPORTING
+        folder_id        = ls_fol_id
+        object_type      = 'RAW'
+        object_hd_change = ls_obj_data
+      IMPORTING
+        object_id        = ls_obj_id
+      TABLES
+        objhead          = it_objhead
+        objcont          = it_content.
+    IF sy-subrc <> 0.
+      IF po_logger IS BOUND.
+        po_logger->add_message( EXPORTING iv_msgty ='E' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 ='Error al insertar objeto XML en SAPoffice (SO_OBJECT_INSERT).' ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    ls_object-objtype = p_type.
+    ls_object-objkey  = iv_factura.
+
+    ls_folmem_k-foltp = ls_fol_id-objtp.
+    ls_folmem_k-folyr = ls_fol_id-objyr.
+    ls_folmem_k-folno = ls_fol_id-objno.
+    ls_folmem_k-doctp = ls_obj_id-objtp.
+    ls_folmem_k-docyr = ls_obj_id-objyr.
+    ls_folmem_k-docno = ls_obj_id-objno.
+    lv_ep_note        = ls_folmem_k.
+
+    ls_note-objtype = 'MESSAGE'.
+    ls_note-objkey  = lv_ep_note.
+
+    CALL FUNCTION 'BINARY_RELATION_CREATE'
+      EXPORTING
+        obj_rolea    = ls_object
+        obj_roleb    = ls_note
+        relationtype = 'ATTA'.
+
+    IF po_logger IS BOUND.
+      IF sy-subrc = 0.
+        po_logger->add_message( EXPORTING iv_msgty ='S' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 = |XML anexado exitosamente a factura { iv_factura }| ).
+      ELSE.
+        po_logger->add_message( EXPORTING iv_msgty = 'E' iv_msgid ='ZCFDI_40' iv_msgno ='001'
+                                iv_msgv1 = 'Error al crear relación ATTA para XML.' ).
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->ATTACH_GOS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VBELN                       TYPE        ZCFDI_HEAD_40-BELNR
+* | [--->] IV_BUKRS                       TYPE        BUKRS
+* | [--->] IV_GJAHR                       TYPE        GJAHR
+* | [--->] IV_XML                         TYPE        XSTRING
+* | [<---] EV_QR                          TYPE        ZQR40
+* | [<-->] CS_HEAD                        TYPE        ZCFDI_HEAD_40
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD attach_gos.
+    DATA: lt_solix     TYPE solix_tab,
+          lv_size      TYPE so_obj_len,
+          ls_docdata   TYPE sodocchgi1,
+          lt_objhead   TYPE soli_tab,
+          ls_fol_id    TYPE soodk,
+          ls_obj_id    TYPE soodk,
+          lt_pack      TYPE STANDARD TABLE OF sopcklsti1,
+          ls_pack      TYPE sopcklsti1,
+          ls_bor_a     TYPE borident,
+          ls_bor_b     TYPE borident,
+          lv_objkeymsg TYPE swo_typeid.
+    IF iv_xml IS INITIAL.
+      RETURN.
+    ENDIF.
+    lt_solix = cl_document_bcs=>xstring_to_solix( iv_xml ).
+    lv_size  = xstrlen( iv_xml ).
+
+    CLEAR ls_docdata.
+    ls_docdata-obj_langu = sy-langu.
+    ls_docdata-obj_name  = 'CFDI_XML'.
+    ls_docdata-obj_descr = |CFDI XML { iv_vbeln }|.
+    APPEND |&SO_FILENAME=CFDI_{ iv_vbeln }.xml| TO lt_objhead.
+
+    CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET' EXPORTING owner = 'B' IMPORTING folder_id = ls_fol_id.
+    IF sy-subrc <> 0. RETURN. ENDIF.
+
+    CLEAR ls_pack.
+    ls_pack-transf_bin = 'X'.
+    ls_pack-head_start = 1.
+    ls_pack-head_num   = lines( lt_objhead ).
+    ls_pack-body_start = 1.
+    ls_pack-body_num   = lines( lt_solix ).
+    ls_pack-doc_type   = 'BIN'.
+    ls_pack-obj_name   = |CFDI_{ iv_vbeln }.xml|.
+    ls_pack-doc_size   = lv_size.
+    APPEND ls_pack TO lt_pack.
+
+    CALL FUNCTION 'SO_DOCUMENT_INSERT_API1'
+      EXPORTING
+        folder_id     = ls_fol_id
+        document_data = ls_docdata
+      IMPORTING
+        document_id   = ls_obj_id
+      TABLES
+        packing_list  = lt_pack
+        object_header = lt_objhead
+        contents_hex  = lt_solix.
+    IF sy-subrc <> 0. RETURN. ENDIF.
+
+    CLEAR ls_bor_b.
+    ls_bor_b-objtype = 'MESSAGE'.
+    lv_objkeymsg     = |{ ls_obj_id-objtp }{ ls_obj_id-objyr }{ ls_obj_id-objno }|.
+    ls_bor_b-objkey  = lv_objkeymsg.
+
+    IF iv_vbeln IS NOT INITIAL.
+      DATA lv_vbeln10 TYPE vbeln.
+      lv_vbeln10 = iv_vbeln.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT' EXPORTING input = lv_vbeln10 IMPORTING output = lv_vbeln10.
+      CLEAR ls_bor_a.
+      ls_bor_a-objtype = 'VBRK'.
+      ls_bor_a-objkey  = lv_vbeln10.
+      CALL FUNCTION 'BINARY_RELATION_CREATE_COMMIT'
+        EXPORTING
+          obj_rolea    = ls_bor_a
+          obj_roleb    = ls_bor_b
+          relationtype = 'ATTA'.
+    ENDIF.
+
+    IF iv_bukrs IS NOT INITIAL AND iv_gjahr IS NOT INITIAL.
+      DATA lv_belnr TYPE belnr_d.
+      lv_belnr = iv_vbeln.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT' EXPORTING input = lv_belnr IMPORTING output = lv_belnr.
+      CLEAR ls_bor_a.
+      ls_bor_a-objtype = 'BKPF'.
+      ls_bor_a-objkey  = |{ iv_bukrs }{ lv_belnr }{ iv_gjahr }|.
+      CALL FUNCTION 'BINARY_RELATION_CREATE_COMMIT'
+        EXPORTING
+          obj_rolea    = ls_bor_a
+          obj_roleb    = ls_bor_b
+          relationtype = 'ATTA'.
+    ENDIF.
+
+    IF cs_head-qr IS NOT INITIAL.
+      ev_qr = cs_head-qr.
+    ELSE.
+      CLEAR ev_qr.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->BUILD_CONCEPTOS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* | [--->] IT_DET                         TYPE        TT_DET
+* | [--->] IV_VER                         TYPE        ABAP_BOOL
+* | [--->] IV_FIX_IMPORT                  TYPE        ABAP_BOOL
+* | [<-->] CV_SUBTOTAL                    TYPE        TY_CURR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_conceptos.
+    DATA: lr_concepts TYPE REF TO if_ixml_element,
+          lv_dec      TYPE i.
+    lr_concepts = mr_doc->create_simple_element( name = 'cfdi:Conceptos' parent = mr_comp ).
+    lv_dec = currency_decimals( is_head-waers ).
+
+    FIELD-SYMBOLS: <ls_det> TYPE zcl_zmfcfdi40_mgs=>ty_det.
+
+    LOOP AT it_det ASSIGNING <ls_det>.
+      DATA: lr_c         TYPE REF TO if_ixml_element,
+            lv_qty_10    TYPE zcl_zmfcfdi40_mgs=>ty_p10,
+            lv_vu_10     TYPE zcl_zmfcfdi40_mgs=>ty_p10,
+            lv_qty_p     TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+            lv_vu_p      TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+            lv_imp       TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+            lv_imp_iva_p TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+            lv_objimp    TYPE string,
+            lv_tasa      TYPE zcl_zmfcfdi40_mgs=>ty_p14.
+
+      lr_c = mr_doc->create_simple_element( name = 'cfdi:Concepto' parent = lr_concepts ).
+
+      IF <ls_det>-cantidad > 0.
+        lv_qty_10 = <ls_det>-cantidad.
+      ELSE.
+        lv_qty_10 = 1.
+      ENDIF.
+      lv_vu_10 = <ls_det>-valor_unit.
+
+      lv_qty_p = lv_qty_10.
+      lv_vu_p  = lv_vu_10.
+
+      IF iv_fix_import = abap_true.
+        lv_imp = round_half_up( iv_val = lv_qty_p * lv_vu_p iv_dec = lv_dec ).
+      ELSE.
+        lv_imp = <ls_det>-dmbtr.
+      ENDIF.
+
+      cv_subtotal = cv_subtotal + lv_imp.
+
+      set_attr( node = lr_c name = 'ClaveProdServ'    value = <ls_det>-clave_prod_serv ).
+      set_attr( node = lr_c name = 'NoIdentificacion' value = <ls_det>-prod_eka ).
+      set_attr( node = lr_c name = 'Cantidad'         value = to_str( iv_val = lv_qty_p iv_dec = lv_dec ) ).
+      set_attr( node = lr_c name = 'ClaveUnidad'      value = <ls_det>-clave_unidad ).
+      set_attr( node = lr_c name = 'Descripcion'      value = <ls_det>-descripcion ).
+      set_attr( node = lr_c name = 'ValorUnitario'    value = to_str( iv_val = lv_vu_p  iv_dec = lv_dec ) ).
+      set_attr( node = lr_c name = 'Importe'          value = to_str( iv_val = lv_imp   iv_dec = lv_dec ) ).
+
+      IF <ls_det>-importe_iva > 0.
+        lv_objimp = '02'.
+      ELSE.
+        lv_objimp = '01'.
+      ENDIF.
+      set_attr( node = lr_c name = 'ObjetoImp' value = lv_objimp ).
+
+      IF <ls_det>-importe_iva > 0.
+        DATA: lr_imps TYPE REF TO if_ixml_element,
+              lr_tras TYPE REF TO if_ixml_element,
+              lr_t    TYPE REF TO if_ixml_element.
+        lr_imps = mr_doc->create_simple_element( name = 'cfdi:Impuestos' parent = lr_c ).
+        lr_tras = mr_doc->create_simple_element( name = 'cfdi:Traslados' parent = lr_imps ).
+        lr_t    = mr_doc->create_simple_element( name = 'cfdi:Traslado'  parent = lr_tras ).
+
+        lv_tasa      = '0.160000'.
+        lv_imp_iva_p = <ls_det>-importe_iva.
+
+        set_attr( node = lr_t name = 'Base'       value = to_str( iv_val = lv_imp        iv_dec = lv_dec ) ).
+        set_attr( node = lr_t name = 'Impuesto'   value = '002' ).
+        set_attr( node = lr_t name = 'TipoFactor' value = 'Tasa' ).
+        set_attr( node = lr_t name = 'TasaOCuota' value = to_str( iv_val = lv_tasa       iv_dec = 6 ) ).
+        set_attr( node = lr_t name = 'Importe'    value = to_str( iv_val = lv_imp_iva_p  iv_dec = 2 ) ).
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->BUILD_CUSTOM_DATA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* | [--->] IT_DET                         TYPE        ZCL_ZMFCFDI40_MGS=>TT_DET
+* | [<---] EV_DOM_STRING                  TYPE        STRING
+* | [<---] EV_DAT_STRING                  TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_custom_data.
+    ev_dom_string = ''.
+    ev_dat_string = ''.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->BUILD_EMISOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_emisor.
+    DATA lr_emisor TYPE REF TO if_ixml_element.
+    lr_emisor = mr_doc->create_simple_element( name = 'cfdi:Emisor' parent = mr_comp ).
+    set_attr( node = lr_emisor name = 'Rfc' value = is_head-rfc_emisor ).
+    IF is_head-nombre_emisor IS NOT INITIAL.
+      set_attr( node = lr_emisor name = 'Nombre' value = is_head-nombre_emisor ).
+    ENDIF.
+    IF is_head-regimen_fiscal IS NOT INITIAL.
+      set_attr( node = lr_emisor name = 'RegimenFiscal' value = is_head-regimen_fiscal ).
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->BUILD_HEADER
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* | [--->] IV_FIX_FECHA                   TYPE        ABAP_BOOL
+* | [<-->] CV_USO_CFDI                    TYPE        TY_CHAR3
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_header.
+    DATA: lv_dec    TYPE i,
+          lv_fecha  TYPE string,
+          lv_y      TYPE c LENGTH 4,
+          lv_m      TYPE c LENGTH 2,
+          lv_d      TYPE c LENGTH 2,
+          lv_h      TYPE c LENGTH 2,
+          lv_i      TYPE c LENGTH 2,
+          lv_s      TYPE c LENGTH 2,
+          lv_tipo   TYPE c LENGTH 1,
+          lv_mon_c  TYPE c LENGTH 5,
+          lv_tc_p   TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+          lv_tc_str TYPE string,
+          lv_tmp_c  TYPE c LENGTH 40.
+
+    lv_dec = currency_decimals( is_head-waers ).
+
+    IF iv_fix_fecha = abap_true.
+      lv_y = sy-datum+0(4).  lv_m = sy-datum+4(2).  lv_d = sy-datum+6(2).
+      lv_h = sy-uzeit+0(2).  lv_i = sy-uzeit+2(2).  lv_s = sy-uzeit+4(2).
+    ELSE.
+      lv_y = is_head-bldat+0(4).  lv_m = is_head-bldat+4(2).  lv_d = is_head-bldat+6(2).
+      lv_h = sy-uzeit+0(2).        lv_i = sy-uzeit+2(2).        lv_s = sy-uzeit+4(2).
+    ENDIF.
+    CONCATENATE lv_y '-' lv_m '-' lv_d 'T' lv_h ':' lv_i ':' lv_s INTO lv_fecha.
+
+    set_attr( node = mr_comp name = 'Version' value = '4.0' ).
+    set_attr( node = mr_comp name = 'Fecha'   value = lv_fecha ).
+
+    lv_mon_c = is_head-waers.
+    set_attr( node = mr_comp name = 'Moneda' value = lv_mon_c ).
+    set_attr( node = mr_comp name = 'LugarExpedicion' value = is_head-lugar_exp ).
+
+    IF is_head-tipo_cambio IS NOT INITIAL AND is_head-waers <> 'MXN'.
+      lv_tmp_c = is_head-tipo_cambio.
+      REPLACE ALL OCCURRENCES OF ',' IN lv_tmp_c WITH '.'.
+      CONDENSE lv_tmp_c NO-GAPS.
+      lv_tc_p   = lv_tmp_c.
+      lv_tc_str = to_str( iv_val = lv_tc_p iv_dec = 6 ).
+      set_attr( node = mr_comp name = 'TipoCambio' value = lv_tc_str ).
+    ENDIF.
+
+    IF is_head-tipo_comp IS NOT INITIAL.
+      lv_tipo = is_head-tipo_comp.
+    ELSE.
+      lv_tipo = 'I'.
+    ENDIF.
+    set_attr( node = mr_comp name = 'TipoDeComprobante' value = lv_tipo ).
+
+    IF is_head-uso_cfdi IS NOT INITIAL.
+      cv_uso_cfdi = is_head-uso_cfdi.
+    ELSE.
+      cv_uso_cfdi = 'G03'.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->BUILD_IMPUESTOS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* | [--->] IV_SUBTOTAL                    TYPE        TY_CURR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_impuestos.
+    DATA: lv_dec       TYPE i,
+          lr_imps      TYPE REF TO if_ixml_element,
+          lr_tras      TYPE REF TO if_ixml_element,
+          lr_t         TYPE REF TO if_ixml_element,
+          lv_base_p14  TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+          lv_iva_p14   TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+          lv_total_p14 TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+          lv_tasa_p14  TYPE zcl_zmfcfdi40_mgs=>ty_p14.
+
+    lv_dec  = currency_decimals( is_head-waers ).
+
+    lr_imps = mr_doc->create_simple_element( name = 'cfdi:Impuestos' parent = mr_comp ).
+    lr_tras = mr_doc->create_simple_element( name = 'cfdi:Traslados' parent = lr_imps ).
+    lr_t    = mr_doc->create_simple_element( name = 'cfdi:Traslado'  parent = lr_tras ).
+
+    lv_base_p14  = iv_subtotal.
+    lv_tasa_p14  = '0.160000'.
+    lv_iva_p14   = round_half_up( iv_val = lv_base_p14 * '0.16' iv_dec = 2 ).
+    lv_total_p14 = lv_base_p14 + lv_iva_p14.
+
+    set_attr( node = lr_t    name = 'Base'       value = to_str( iv_val = lv_base_p14  iv_dec = lv_dec ) ).
+    set_attr( node = lr_t    name = 'Impuesto'   value = '002' ).
+    set_attr( node = lr_t    name = 'TipoFactor' value = 'Tasa' ).
+    set_attr( node = lr_t    name = 'TasaOCuota' value = to_str( iv_val = lv_tasa_p14  iv_dec = 6 ) ).
+    set_attr( node = lr_t    name = 'Importe'    value = to_str( iv_val = lv_iva_p14   iv_dec = 2 ) ).
+
+    set_attr( node = lr_imps name = 'TotalImpuestosTrasladados' value = to_str( iv_val = lv_iva_p14 iv_dec = 2 ) ).
+    set_attr( node = mr_comp name = 'SubTotal' value = to_str( iv_val = lv_base_p14  iv_dec = lv_dec ) ).
+    set_attr( node = mr_comp name = 'Total'    value = to_str( iv_val = lv_total_p14 iv_dec = lv_dec ) ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->BUILD_RECEPTOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_receptor.
+    DATA: lr_receptor TYPE REF TO if_ixml_element,
+          lv_cp       TYPE string.
+    lr_receptor = mr_doc->create_simple_element( name = 'cfdi:Receptor' parent = mr_comp ).
+    set_attr( node = lr_receptor name = 'Rfc'    value = is_head-rfc_receptor ).
+    set_attr( node = lr_receptor name = 'Nombre' value = is_head-nombre_receptor ).
+    IF is_head-rfc_receptor(2) = 'XE'.
+      lv_cp = '11320'.
+    ELSE.
+      lv_cp = is_head-lugar_exp.
+    ENDIF.
+    set_attr( node = lr_receptor name = 'DomicilioFiscalReceptor' value = lv_cp ).
+    IF is_head-uso_cfdi IS NOT INITIAL.
+      set_attr( node = lr_receptor name = 'UsoCFDI' value = is_head-uso_cfdi ).
+    ELSE.
+      set_attr( node = lr_receptor name = 'UsoCFDI' value = 'G03' ).
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->CONSTRUCTOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_FORM_PROG                   TYPE        PROGNAME (default ='ZSD0100')
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD constructor.
+    mv_form_prog = iv_form_prog.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->CURRENCY_DECIMALS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_WAERS                       TYPE        WAERS
+* | [<-()] RV_DEC                         TYPE        I
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD currency_decimals.
+    CASE iv_waers.
+      WHEN 'JPY'. rv_dec = 0.
+      WHEN OTHERS. rv_dec = 2.
+    ENDCASE.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->GET_DATA_FACTURA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VBELN                       TYPE        VBELN_VF
+* | [--->] IV_FECHADOC                    TYPE        SYDATUM
+* | [<---] CT_HEAD_CFDI                   TYPE        TT_HEAD
+* | [<---] CT_DET_CFDI                    TYPE        TT_DET
+* | [<---] EV_VGJAHR                      TYPE        GJAHR
+* | [<---] EV_ERROR                       TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_data_factura.
+    DATA: ls_vbrk           TYPE vbrk,
+          lt_header         TYPE TABLE OF vbrkvb,
+          lt_positions      TYPE TABLE OF vbrpvb,
+          lt_pos_price_cond TYPE TABLE OF komv,
+          lt_partners       TYPE TABLE OF vbpavb,
+          wa_t001           TYPE t001,
+          wa_adrc           TYPE adrc,
+          ls_header         TYPE vbrkvb,
+          l_exch_rate       TYPE bapi1093_0,
+          l_return          TYPE bapiret1,
+          pi_fcurr_des      TYPE waers VALUE 'MXN',
+          lv_rfc_rec        TYPE stcd1,
+          lv_rfc_em         TYPE stcd1,
+          lv_tc             TYPE ukurs,
+          lv_name1          TYPE kna1-name1.
+
+    CLEAR: ev_error, ev_vgjahr.
+    REFRESH: ct_head_cfdi, ct_det_cfdi.
+
+    ls_vbrk-vbeln = iv_vbeln.
+    REFRESH: lt_pos_price_cond, lt_partners, lt_header, lt_positions.
+
+    CALL FUNCTION 'RV_INVOICE_DOCUMENT_READ'
+      EXPORTING
+        konv_read = abap_true
+        no_nast   = space
+        vbrk_i    = ls_vbrk
+      TABLES
+        xkomv     = lt_pos_price_cond
+        xvbpa     = lt_partners
+        xvbrk     = lt_header
+        xvbrp     = lt_positions.
+
+    READ TABLE lt_header INTO ls_header WITH KEY vbeln = iv_vbeln.
+    IF sy-subrc <> 0.
+      ev_error = |No se encontró cabecera de factura { iv_vbeln }|.
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE * INTO wa_t001 FROM t001 WHERE bukrs = ls_header-bukrs.
+    IF sy-subrc = 0 AND wa_t001-adrnr IS NOT INITIAL.
+      SELECT SINGLE * INTO wa_adrc FROM adrc WHERE addrnumber = wa_t001-adrnr.
+    ENDIF.
+
+    SELECT SINGLE stcd1 name1 INTO (lv_rfc_rec, lv_name1) FROM kna1 WHERE kunnr = ls_header-kunag.
+    SELECT SINGLE paval INTO lv_rfc_em FROM t001z WHERE bukrs = ls_header-bukrs AND party = 'MX_RFC'.
+
+    IF ls_header-waerk = 'MXN'.
+      lv_tc = 1.
+    ELSE.
+      CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+        EXPORTING
+                       rate_type ='M'
+          from_curr  = ls_header-waerk
+          to_currncy = pi_fcurr_des
+          date       = iv_fechadoc
+        IMPORTING
+          exch_rate  = l_exch_rate
+          return     = l_return.
+      IF sy-subrc = 0 AND l_exch_rate-exch_rate IS NOT INITIAL.
+        lv_tc = l_exch_rate-exch_rate.
+      ELSE.
+        lv_tc = 1.
+      ENDIF.
+    ENDIF.
+
+    DATA ls_head TYPE LINE OF zcl_zmfcfdi40_mgs=>tt_head.
+    CLEAR ls_head.
+    ls_head-tipo_comp       = 'I'.
+    ls_head-bukrs           = ls_header-bukrs.
+    ls_head-belnr           = ls_header-vbeln.
+    ls_head-bldat           = ls_header-fkdat.
+    ls_head-gjahr           = ls_header-fkdat(4).
+    ls_head-tipo_doc        = 'FF'.
+    ls_head-uzeit           = sy-uzeit.
+    ls_head-lugar_exp       = wa_adrc-post_code1.
+    ls_head-total           = ls_header-netwr + ls_header-mwsbk.
+    ls_head-waers           = ls_header-waerk.
+    ls_head-total_iva       = ls_header-mwsbk.
+    ls_head-subtotal        = ls_header-netwr.
+    ls_head-version         = '4.0'.
+    ls_head-regimen_fiscal  = '601'.
+    ls_head-kunnr           = ls_header-kunag.
+    ls_head-nombre_emisor   = wa_t001-butxt.
+    ls_head-rfc_emisor      = lv_rfc_em.
+    ls_head-nombre_receptor = lv_name1.
+    ls_head-rfc_receptor    = lv_rfc_rec.
+    ls_head-factura         = ls_header-belnr.
+    ls_head-uso_cfdi        = 'G03'.
+    ls_head-vkorg           = ls_header-vkorg.
+    ls_head-vtweg           = ls_header-vtweg.
+    ls_head-spart           = ls_header-spart.
+    ls_head-tipo_cambio     = lv_tc.
+
+    ev_vgjahr = ls_head-gjahr.
+    APPEND ls_head TO ct_head_cfdi.
+
+    DATA: lv_tasa TYPE p LENGTH 16 DECIMALS 6 VALUE '0.16',
+          ls_det  TYPE LINE OF zcl_zmfcfdi40_mgs=>tt_det.
+
+    LOOP AT lt_positions ASSIGNING FIELD-SYMBOL(<ls_pos>).
+      CLEAR ls_det.
+      ls_det-bukrs           = ls_head-bukrs.
+      ls_det-belnr           = <ls_pos>-vbeln.
+      ls_det-gjahr           = ev_vgjahr.
+      ls_det-dmbtr           = <ls_pos>-netwr.
+      ls_det-valor_unit      = <ls_pos>-netwr.
+      ls_det-descripcion     = ''.
+      ls_det-clave_unidad    = ''.
+      ls_det-cantidad        = <ls_pos>-fkimg.
+      ls_det-clave_prod_serv = ''.
+      ls_det-prod_eka        = <ls_pos>-matnr.
+      ls_det-importe_iva     = <ls_pos>-netwr * lv_tasa.
+      APPEND ls_det TO ct_det_cfdi.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->GET_VERSION40
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        TY_HEAD
+* | [<-()] RV_V40                         TYPE        ABAP_BOOL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_version40.
+    rv_v40 = abap_true.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->IXML_INIT
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD ixml_init.
+    mr_ixml = cl_ixml=>create( ).
+    mr_doc  = mr_ixml->create_document( ).
+    mr_comp = mr_doc->create_simple_element( name = 'cfdi:Comprobante' parent = mr_doc ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->LLENA_TABLA_PRINCIPAL_FM
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VBELN                       TYPE        VBELN_VF
+* | [<---] EV_FIRST_SALES_ORDER           TYPE        VBELN_VA
+* | [<---] EV_COLLECT_POSITIONS           TYPE        VBKD-MRNKZ
+* | [<---] EV_PURCHASE_NO                 TYPE        VBKD-BSTKD
+* | [<---] EV_ERROR                       TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD llena_tabla_principal_fm.
+    DATA: ls_vbrk           TYPE vbrk,
+          lt_header         TYPE TABLE OF vbrkvb,
+          lt_positions      TYPE TABLE OF vbrpvb,
+          lt_pos_price_cond TYPE TABLE OF komv,
+          lt_partners       TYPE TABLE OF vbpavb,
+          ls_header         TYPE vbrkvb.
+
+    CLEAR: ev_first_sales_order, ev_collect_positions, ev_purchase_no, ev_error.
+
+    ls_vbrk-vbeln = iv_vbeln.
+    REFRESH: lt_header, lt_positions, lt_pos_price_cond, lt_partners.
+
+    CALL FUNCTION 'RV_INVOICE_DOCUMENT_READ'
+      EXPORTING
+        konv_read = abap_true
+        no_nast   = space
+        vbrk_i    = ls_vbrk
+      TABLES
+        xvbrk     = lt_header
+        xvbrp     = lt_positions
+        xkomv     = lt_pos_price_cond
+        xvbpa     = lt_partners.
+
+    READ TABLE lt_header INTO ls_header WITH KEY vbeln = iv_vbeln.
+    IF sy-subrc <> 0.
+      ev_error = |No se encontró cabecera de factura { iv_vbeln }|.
+      RETURN.
+    ENDIF.
+
+    FIELD-SYMBOLS <ls_pos> TYPE vbrpvb.
+    SORT lt_positions BY posnr.
+    LOOP AT lt_positions ASSIGNING <ls_pos>.
+      IF <ls_pos>-aubel IS NOT INITIAL.
+        ev_first_sales_order = <ls_pos>-aubel.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    IF ev_first_sales_order IS INITIAL.
+      READ TABLE lt_positions ASSIGNING <ls_pos> INDEX 1.
+      IF sy-subrc = 0 AND <ls_pos>-aubel IS NOT INITIAL.
+        ev_first_sales_order = <ls_pos>-aubel.
+      ENDIF.
+    ENDIF.
+
+    IF ev_first_sales_order IS NOT INITIAL.
+      SELECT SINGLE mrnkz bstkd
+        INTO (ev_collect_positions, ev_purchase_no)
+        FROM vbkd
+        WHERE vbeln = ev_first_sales_order.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->MAYBE_ADDENDA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* | [--->] I_ADDENDA                      TYPE        TY_C1
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD maybe_addenda.
+    IF i_addenda = 'X'.
+      mr_doc->create_simple_element( name = 'cfdi:Addenda' parent = mr_comp ).
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->PARSE_PAC_OUTPUT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_OUTPUT                      TYPE        STRING
+* | [<---] EV_UUID                        TYPE        ZUUID
+* | [<---] EV_CAD                         TYPE        STRING
+* | [<---] EV_FT                          TYPE        STRING
+* | [<---] EV_XMLX                        TYPE        XSTRING
+* | [<---] EV_URL                         TYPE        ZQR40
+* | [<---] EV_ERROR                       TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD parse_pac_output.
+    CLEAR: ev_uuid, ev_cad, ev_ft, ev_url, ev_error, ev_xmlx.
+    IF iv_output IS NOT INITIAL.
+      CALL FUNCTION 'SCMS_STRING_TO_XSTRING' EXPORTING text = iv_output IMPORTING buffer = ev_xmlx.
+      IF sy-subrc <> 0.
+        CLEAR ev_xmlx.
+        ev_error = 'Error al convertir salida del PAC a XSTRING.'.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->RENDER_TO_STRING
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IO_DOC                         TYPE REF TO IF_IXML_DOCUMENT
+* | [<---] EV_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD render_to_string.
+    DATA: lo_streamfactory TYPE REF TO if_ixml_stream_factory,
+          lo_ostream       TYPE REF TO if_ixml_ostream,
+          lo_renderer      TYPE REF TO if_ixml_renderer,
+          lv_out           TYPE string.
+    lo_streamfactory = mr_ixml->create_stream_factory( ).
+    lo_ostream       = lo_streamfactory->create_ostream_cstring( string = lv_out ).
+    lo_renderer      = mr_ixml->create_renderer( document = io_doc ostream = lo_ostream ).
+    lo_renderer->set_normalizing( abap_true ).
+    lo_renderer->render( ).
+    ev_xml = lv_out.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->ROUND_HALF_UP
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VAL                         TYPE        TY_P14
+* | [--->] IV_DEC                         TYPE        I
+* | [<-()] RV_VAL                         TYPE        TY_P14
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD round_half_up.
+    DATA: lv_d        TYPE i,
+          lv_scale_df TYPE decfloat34 VALUE '1',
+          lv_temp_df  TYPE decfloat34,
+          lv_res_df   TYPE decfloat34,
+          lv_int_p    TYPE p LENGTH 16 DECIMALS 0.
+    lv_d = iv_dec.
+    IF lv_d < 0. lv_d = 0. ELSEIF lv_d > 14. lv_d = 14. ENDIF.
+    DO lv_d TIMES.
+      lv_scale_df = lv_scale_df * 10.
+    ENDDO.
+    lv_temp_df = iv_val * lv_scale_df.
+    IF lv_temp_df >= 0. lv_temp_df = lv_temp_df + '0.5'. ELSE. lv_temp_df = lv_temp_df - '0.5'. ENDIF.
+    CLEAR lv_int_p.
+    lv_int_p = lv_temp_df.
+    lv_res_df = lv_int_p / lv_scale_df.
+    rv_val    = lv_res_df.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->SEND_TO_PAC
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZCFDI_HEAD_40
+* | [--->] IV_XML                         TYPE        STRING
+* | [--->] IV_DOM                         TYPE        STRING
+* | [--->] IV_DAT                         TYPE        STRING
+* | [<---] ES_OUTPUT                      TYPE        STRING
+* | [<---] EV_ERROR_S                     TYPE        STRING
+* | [<---] EV_IS_PROD                     TYPE        ABAP_BOOL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD send_to_pac.
+    DATA: lv_url       TYPE string,
+          lv_user      TYPE string,
+          lv_pass      TYPE string,
+          lv_prod_flag TYPE c LENGTH 1,
+          lv_save      TYPE c LENGTH 1,
+          lv_dir       TYPE string.
+    CLEAR: es_output, ev_error_s.
+    ev_is_prod = abap_false.
+
+    SELECT SINGLE low INTO lv_url       FROM tvarvc WHERE name = 'ZCFDI40_PAC_URL'.
+    SELECT SINGLE low INTO lv_user      FROM tvarvc WHERE name = 'ZCFDI40_PAC_USER'.
+    SELECT SINGLE low INTO lv_pass      FROM tvarvc WHERE name = 'ZCFDI40_PAC_PASS'.
+    SELECT SINGLE low INTO lv_prod_flag FROM tvarvc WHERE name = 'ZCFDI40_PAC_PROD'.
+    SELECT SINGLE low INTO lv_save      FROM tvarvc WHERE name = 'ZCFDI40_SAVE_REQRES'.
+    SELECT SINGLE low INTO lv_dir       FROM tvarvc WHERE name = 'ZCFDI40_SAVE_DIR'.
+
+    IF lv_prod_flag = 'X'.
+      ev_is_prod = abap_true.
+    ENDIF.
+
+    IF lv_url IS INITIAL.
+      ev_error_s = 'PAC no configurado (TVARVC ZCFDI40_PAC_URL)'.
+      RETURN.
+    ENDIF.
+
+    DATA lo_http TYPE REF TO if_http_client.
+    TRY.
+        cl_http_client=>create_by_url( EXPORTING url = lv_url IMPORTING client = lo_http ).
+        lo_http->request->set_header_field( name = '~request_method' value = 'POST' ).
+        lo_http->request->set_header_field( name = 'Content-Type'    value = 'application/xml; charset=UTF-8' ).
+        IF lv_user IS NOT INITIAL.
+          lo_http->authenticate( username = lv_user password = lv_pass ).
+        ENDIF.
+
+        DATA lv_req_x TYPE xstring.
+        CALL FUNCTION 'SCMS_STRING_TO_XSTRING' EXPORTING text = iv_xml IMPORTING buffer = lv_req_x.
+        IF sy-subrc = 0 AND lv_req_x IS NOT INITIAL.
+          lo_http->request->set_data( lv_req_x ).
+        ELSE.
+          lo_http->request->set_cdata( iv_xml ).
+        ENDIF.
+
+        lo_http->send( ).
+        lo_http->receive( ).
+
+        DATA: lv_code   TYPE i,
+              lv_reason TYPE string,
+              lv_resp_x TYPE xstring,
+              lv_resp_s TYPE string.
+        lo_http->response->get_status( IMPORTING code = lv_code reason = lv_reason ).
+        lv_resp_x = lo_http->response->get_data( ).
+        IF lv_resp_x IS NOT INITIAL.
+          CALL FUNCTION 'SCMS_XSTRING_TO_STRING'
+            EXPORTING
+              buffer   = lv_resp_x
+              encoding = 'UTF-8'
+            IMPORTING
+              text     = lv_resp_s.
+          IF sy-subrc <> 0.
+            lv_resp_s = lo_http->response->get_cdata( ).
+          ENDIF.
+        ELSE.
+          lv_resp_s = lo_http->response->get_cdata( ).
+        ENDIF.
+        es_output = lv_resp_s.
+        IF lv_code < 200 OR lv_code >= 300.
+          ev_error_s = |HTTP { lv_code } al llamar PAC: { lv_reason }|.
+        ENDIF.
+        lo_http->close( ).
+      CATCH cx_root INTO DATA(lx).
+        ev_error_s = lx->get_text( ).
+        CLEAR es_output.
+    ENDTRY.
+
+    IF lv_save = 'X' AND lv_dir IS NOT INITIAL.
+      DATA: lv_stamp   TYPE string,
+            lv_date    TYPE c LENGTH 8,
+            lv_time    TYPE c LENGTH 6,
+            lv_reqfile TYPE string,
+            lv_resfile TYPE string.
+      lv_date  = sy-datum.
+      lv_time  = sy-uzeit.
+      lv_stamp = |{ lv_date }_{ lv_time }|.
+      IF lv_dir CP '*/'.
+        lv_reqfile = lv_dir && |REQ_{ is_head-belnr }_{ lv_stamp }.xml|.
+        lv_resfile = lv_dir && |RES_{ is_head-belnr }_{ lv_stamp }.xml|.
+      ELSE.
+        lv_reqfile = lv_dir && |/REQ_{ is_head-belnr }_{ lv_stamp }.xml|.
+        lv_resfile = lv_dir && |/RES_{ is_head-belnr }_{ lv_stamp }.xml|.
+      ENDIF.
+      OPEN DATASET lv_reqfile FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+      IF sy-subrc = 0. TRANSFER iv_xml    TO lv_reqfile. CLOSE DATASET lv_reqfile. ENDIF.
+      IF es_output IS NOT INITIAL.
+        OPEN DATASET lv_resfile FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+        IF sy-subrc = 0. TRANSFER es_output TO lv_resfile. CLOSE DATASET lv_resfile. ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->SET_ATTR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] NODE                           TYPE REF TO IF_IXML_ELEMENT
+* | [--->] NAME                           TYPE        STRING
+* | [--->] VALUE                          TYPE        ANY
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD set_attr.
+ DATA lv_str TYPE c LENGTH 255.
+DATA lv_raw_string TYPE string.
+  " Sin nodo o sin nombre => no hace nada
+  IF node IS NOT BOUND OR name IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " Convertir cualquier tipo a string y normalizar espacios
+  CLEAR lv_str.
+  WRITE value TO lv_str.
+  SHIFT lv_str LEFT  DELETING LEADING space.
+  SHIFT lv_str RIGHT DELETING TRAILING space.
+  lv_raw_string = value.
+  lv_str = lv_raw_string.
+
+  " Asignar atributo (iXML se encarga del escape XML)
+  node->set_attribute(
+    name  = name
+    value = lv_raw_string ).
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->TIMBRAR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] T_HEAD_CFDI                    TYPE        TT_HEAD
+* | [--->] T_DET_CFDI                     TYPE        TT_DET
+* | [--->] I_ADDENDA                      TYPE        TY_C1
+* | [--->] I_PEDIDO                       TYPE        VBELN_VA
+* | [--->] IV_FIX_IMPORTES                TYPE        ABAP_BOOL (default =ABAP_TRUE)
+* | [--->] IV_FIX_FECHA                   TYPE        ABAP_BOOL (default =ABAP_TRUE)
+* | [<---] E_UUID                         TYPE        ZUUID
+* | [<---] E_ERROR                        TYPE        STRING
+* | [<---] E_URL                          TYPE        ZQR40
+* | [<-->] PO_LOGGER                      TYPE REF TO ZCL_LOGGER
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD timbrar.
+    DATA: ls_head       TYPE zcfdi_head_40,
+          lt_det        TYPE zcl_zmfcfdi40_mgs=>tt_det,
+          lv_subtot     TYPE zcl_zmfcfdi40_mgs=>ty_curr,
+          lv_dom_string TYPE string,
+          lv_dat_string TYPE string,
+          lv_xml_string TYPE string,
+          lv_uso_cfdi   TYPE char3.
+    DATA: ls_head_aux TYPE LINE OF tt_head.
+    READ TABLE t_head_cfdi INDEX 1 INTO ls_head_aux.
+    IF sy-subrc <> 0.
+      e_error = 'T_HEAD_CFDI vacío'.
+      RETURN.
+    ENDIF.
+    lt_det = t_det_cfdi.
+    CLEAR lv_uso_cfdi.
+
+    ixml_init( ).
+
+    build_header(
+      EXPORTING is_head = ls_head iv_fix_fecha = iv_fix_fecha
+      CHANGING  cv_uso_cfdi = lv_uso_cfdi ).
+
+    build_emisor(   EXPORTING is_head = ls_head ).
+    build_receptor( EXPORTING is_head = ls_head ).
+
+    CLEAR lv_subtot.
+    build_conceptos(
+      EXPORTING is_head = ls_head it_det = lt_det iv_ver = abap_true iv_fix_import = iv_fix_importes
+      CHANGING  cv_subtotal = lv_subtot ).
+
+    build_impuestos(
+      EXPORTING is_head = ls_head iv_subtotal = lv_subtot ).
+
+    me->build_custom_data(
+      EXPORTING is_head       = ls_head
+                it_det        = lt_det
+      IMPORTING ev_dom_string = lv_dom_string
+                ev_dat_string = lv_dat_string ).
+
+    maybe_addenda( EXPORTING is_head = ls_head i_addenda = i_addenda ).
+
+    render_to_string( EXPORTING io_doc = mr_doc IMPORTING ev_xml = lv_xml_string ).
+
+    DATA: lv_pac_out TYPE string,
+          lv_err_s   TYPE string,
+          lv_is_prod TYPE abap_bool.
+    send_to_pac(
+      EXPORTING is_head = ls_head iv_xml = lv_xml_string iv_dom = lv_dom_string iv_dat = lv_dat_string
+      IMPORTING es_output = lv_pac_out ev_error_s = lv_err_s ev_is_prod = lv_is_prod ).
+
+    DATA: lv_uuid TYPE zuuid,
+          lv_cad  TYPE string,
+          lv_ft   TYPE string,
+          lv_xmlx TYPE xstring,
+          lv_url  TYPE zqr40,
+          lv_err  TYPE string.
+
+me->parse_pac_output(
+  EXPORTING
+    iv_output = lv_pac_out
+  IMPORTING
+    ev_uuid   = lv_uuid
+    ev_cad    = lv_cad
+    ev_ft     = lv_ft
+    ev_xmlx   = lv_xmlx
+    ev_url    = lv_url
+    ev_error  = lv_err ).
+    IF lv_err IS NOT INITIAL OR lv_uuid IS INITIAL.
+      IF lv_err IS NOT INITIAL.
+        e_error = lv_err.
+      ELSE.
+        e_error = lv_err_s.
+      ENDIF.
+
+      IF ls_head-belnr IS NOT INITIAL.
+        DATA: lt_solix_e   TYPE solix_tab,
+              lv_size_e    TYPE so_obj_len,
+              ls_docdata_e TYPE sodocchgi1,
+              lt_objhead_e TYPE soli_tab,
+              ls_fol_id_e  TYPE soodk,
+              ls_obj_id_e  TYPE soodk,
+              lt_pack_e    TYPE STANDARD TABLE OF sopcklsti1,
+              ls_pack_e    TYPE sopcklsti1,
+              ls_bor_a_e   TYPE borident,
+              ls_bor_b_e   TYPE borident,
+              lv_objkey_e  TYPE swo_typeid,
+              lv_err_txt   TYPE string,
+              lv_err_x     TYPE xstring.
+        lv_err_txt = |Error de timbrado PAC: { e_error }|.
+        CALL FUNCTION 'SCMS_STRING_TO_XSTRING' EXPORTING text = lv_err_txt IMPORTING buffer = lv_err_x.
+        IF lv_err_x IS NOT INITIAL.
+          lt_solix_e = cl_document_bcs=>xstring_to_solix( lv_err_x ).
+          lv_size_e  = xstrlen( lv_err_x ).
+
+          CLEAR ls_docdata_e.
+          ls_docdata_e-obj_langu = sy-langu.
+          ls_docdata_e-obj_name  = 'PAC_ERROR'.
+          ls_docdata_e-obj_descr = |PAC Error { ls_head-belnr }|.
+          APPEND |&SO_FILENAME=PAC_ERROR_{ ls_head-belnr }.txt| TO lt_objhead_e.
+
+          CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET' EXPORTING owner = 'B' IMPORTING folder_id = ls_fol_id_e.
+          IF sy-subrc = 0.
+            CLEAR ls_pack_e.
+            ls_pack_e-transf_bin = 'X'.
+            ls_pack_e-head_start = 1.
+            ls_pack_e-head_num   = lines( lt_objhead_e ).
+            ls_pack_e-body_start = 1.
+            ls_pack_e-body_num   = lines( lt_solix_e ).
+            ls_pack_e-doc_type   = 'RAW'.
+            ls_pack_e-obj_name   = |PAC_ERROR_{ ls_head-belnr }.txt|.
+            ls_pack_e-doc_size   = lv_size_e.
+            APPEND ls_pack_e TO lt_pack_e.
+
+            CALL FUNCTION 'SO_DOCUMENT_INSERT_API1'
+              EXPORTING
+                folder_id     = ls_fol_id_e
+                document_data = ls_docdata_e
+              IMPORTING
+                document_id   = ls_obj_id_e
+              TABLES
+                packing_list  = lt_pack_e
+                object_header = lt_objhead_e
+                contents_hex  = lt_solix_e.
+
+            IF sy-subrc = 0.
+              CLEAR ls_bor_b_e.
+              ls_bor_b_e-objtype = 'MESSAGE'.
+              lv_objkey_e        = |{ ls_obj_id_e-objtp }{ ls_obj_id_e-objyr }{ ls_obj_id_e-objno }|.
+              ls_bor_b_e-objkey  = lv_objkey_e.
+
+              DATA lv_vbeln10_e TYPE vbeln.
+              lv_vbeln10_e = ls_head-belnr.
+              CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT' EXPORTING input = lv_vbeln10_e IMPORTING output = lv_vbeln10_e.
+              CLEAR ls_bor_a_e.
+              ls_bor_a_e-objtype = 'VBRK'.
+              ls_bor_a_e-objkey  = lv_vbeln10_e.
+              CALL FUNCTION 'BINARY_RELATION_CREATE_COMMIT'
+                EXPORTING
+                  obj_rolea    = ls_bor_a_e
+                  obj_roleb    = ls_bor_b_e
+                  relationtype = 'ATTA'.
+
+              IF ls_head-bukrs IS NOT INITIAL AND ls_head-gjahr IS NOT INITIAL.
+                DATA lv_belnr_e TYPE belnr_d.
+                lv_belnr_e = ls_head-belnr.
+                CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT' EXPORTING input = lv_belnr_e IMPORTING output = lv_belnr_e.
+                CLEAR ls_bor_a_e.
+                ls_bor_a_e-objtype = 'BKPF'.
+                ls_bor_a_e-objkey  = |{ ls_head-bukrs }{ lv_belnr_e }{ ls_head-gjahr }|.
+                CALL FUNCTION 'BINARY_RELATION_CREATE_COMMIT'
+                  EXPORTING
+                    obj_rolea    = ls_bor_a_e
+                    obj_roleb    = ls_bor_b_e
+                    relationtype = 'ATTA'.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    DATA: ls_head_db  TYPE zcfdi_head_40,
+          ls_head_out TYPE zcfdi_head_40.
+    MOVE-CORRESPONDING ls_head TO ls_head_db.
+
+    " Persistencia real Z* (ajústala a tus tablas); de momento eco.
+    ls_head_out = ls_head_db.
+
+    attach_gos(
+      EXPORTING iv_vbeln = ls_head-belnr iv_bukrs = ls_head-bukrs iv_gjahr = ls_head-gjahr iv_xml = lv_xmlx
+      IMPORTING ev_qr    = lv_url
+      CHANGING  cs_head  = ls_head_out ).
+
+    e_uuid = lv_uuid.
+    e_url  = lv_url.
+    CLEAR e_error.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_ZMFCFDI40_MGS->TO_STR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VAL                         TYPE        TY_P14
+* | [--->] IV_DEC                         TYPE        I
+* | [<-()] RV_STR                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD to_str.
+    DATA: lv_d   TYPE i,
+          lv_num TYPE zcl_zmfcfdi40_mgs=>ty_p14,
+          lv_buf TYPE c LENGTH 120,
+          lv_str TYPE string.
+    lv_d = iv_dec.
+    IF lv_d < 0. lv_d = 0. ELSEIF lv_d > 14. lv_d = 14. ENDIF.
+    lv_num = iv_val.
+    CLEAR lv_buf.
+    WRITE lv_num TO lv_buf DECIMALS lv_d NO-GROUPING.
+    lv_str = lv_buf.
+    SHIFT lv_str LEFT  DELETING LEADING space.
+    SHIFT lv_str RIGHT DELETING TRAILING space.
+    REPLACE ALL OCCURRENCES OF ',' IN lv_str WITH '.'.
+    REPLACE ALL OCCURRENCES OF ' ' IN lv_str WITH ''.
+    rv_str = lv_str.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_ZMFCFDI40_MGS->ZFI_UPDATE_TEXT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_BELNR                       TYPE        ZFID_NOPER
+* | [--->] IV_GJAHR                       TYPE        GJAHR
+* | [--->] IV_BUKRS                       TYPE        BUKRS
+* | [--->] IV_UUID                        TYPE        ZFID_UUID_CFDI
+* | [--->] IV_TDOBJECT                    TYPE        TDOBJECT(optional)
+* | [<---] EV_SUCCESS                     TYPE        FLAG
+* | [<---] EV_MESSAGE                     TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD zfi_update_text.
+    DATA: lw_header    TYPE thead,
+          lw_line      TYPE tline,
+          lt_lines     TYPE STANDARD TABLE OF tline,
+          lv_documento TYPE tdobname,
+          lv_subrc     TYPE sy-subrc,
+          lv_line      TYPE string.
+    CLEAR: ev_success, ev_message.
+
+    IF iv_bukrs IS INITIAL OR iv_belnr IS INITIAL OR iv_gjahr IS INITIAL OR iv_uuid IS INITIAL.
+      ev_message = 'Error: parámetros obligatorios vacíos (BUKRS, BELNR, GJAHR, UUID)'.
+      RETURN.
+    ENDIF.
+
+    CONCATENATE iv_bukrs iv_belnr iv_gjahr INTO lv_documento.
+    CONDENSE lv_documento.
+
+    IF iv_tdobject IS INITIAL.
+      lw_header-tdobject = 'BELEG'.
+      lw_header-tdid     = 'YUUD'.
+      lw_header-tdname   = lv_documento.
+    ELSE.
+      lw_header-tdobject = iv_tdobject.
+      lw_header-tdid     = 'ZUUI'.
+      lw_header-tdname   = iv_belnr.
+    ENDIF.
+    lw_header-tdspras    = sy-langu.
+
+    CLEAR lw_line.
+    lw_line-tdformat = 'ST'.
+    lw_line-tdline   = iv_uuid.
+    APPEND lw_line TO lt_lines.
+
+    CALL FUNCTION 'SAVE_TEXT'
+      EXPORTING
+        client          = sy-mandt
+        header          = lw_header
+        insert          = 'X'
+        savemode_direct = 'X'
+      TABLES
+        lines           = lt_lines
+                          EXCEPTIONS id=1 language=2 name=3 object=4 others=5.
+
+    lv_subrc = sy-subrc.
+    CONCATENATE 'IV_BELNR: ' iv_belnr INTO lv_line.
+
+    IF lv_subrc = 0.
+      CALL FUNCTION 'COMMIT_TEXT'.
+      ev_success = abap_true.
+      CONCATENATE 'Texto guardado' ':' lv_line
+             INTO ev_message SEPARATED BY cl_abap_char_utilities=>newline.
+    ELSE.
+      CASE lv_subrc.
+        WHEN 1.  ev_message = |Error| && cl_abap_char_utilities=>newline && |ID de texto no válido.| .
+        WHEN 2.  ev_message = |Error| && cl_abap_char_utilities=>newline && |idioma no válido.| .
+        WHEN 3.  ev_message = |Error| && cl_abap_char_utilities=>newline && |nombre de texto no válido.| .
+        WHEN 4.  ev_message = |Error| && cl_abap_char_utilities=>newline && |objeto de texto no válido.| .
+        WHEN OTHERS.
+          ev_message = |Error| && cl_abap_char_utilities=>newline && |desconocido al guardar el texto.| .
+      ENDCASE.
+      ev_message = ev_message && cl_abap_char_utilities=>newline && lv_line.
+      ev_message = ev_message && cl_abap_char_utilities=>newline && |Año: |  && iv_gjahr.
+      ev_message = ev_message && cl_abap_char_utilities=>newline && |Bukrs: | && iv_bukrs.
+      ev_message = ev_message && cl_abap_char_utilities=>newline && |UUID: |  && iv_uuid.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.

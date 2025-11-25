@@ -1,0 +1,58 @@
+
+"======================
+" Popup Dynpro 0100: PAI/PBO (marca back)
+"======================
+MODULE user_command_0100 INPUT.
+
+  DATA: lv_cat_local TYPE string,
+        lv_com_local TYPE string.
+
+  CONSTANTS:
+    c_ok     TYPE sy-ucomm VALUE 'OK',
+    c_enter  TYPE sy-ucomm VALUE 'ENTER',
+    c_cancel TYPE sy-ucomm VALUE 'CANCEL',
+    c_back   TYPE sy-ucomm VALUE 'BACK',
+    c_esc    TYPE sy-ucomm VALUE 'CANC'.
+
+  CASE sy-ucomm.
+
+    WHEN c_back OR c_cancel OR c_esc.
+      CLEAR: gv_categoria, gv_comentario.
+      gv_cancel    = abap_true.
+      gv_from_back = abap_true.
+      LEAVE SCREEN.
+
+    WHEN c_ok OR c_enter.
+      lv_cat_local = gv_categoria.
+      lv_com_local = gv_comentario.
+
+      IF lv_cat_local IS INITIAL.
+        gv_habilitar_campos = abap_true.
+        MESSAGE 'Debe seleccionar una categoría de cancelación' TYPE 'E'.
+      ENDIF.
+
+      IF lv_com_local IS INITIAL.
+        CASE lv_cat_local.
+          WHEN '01'.
+            gv_habilitar_campos = abap_true.
+        ENDCASE.
+
+        IF gv_habilitar_campos = abap_true.
+          MESSAGE 'Debe ingresar el numero de UUID' TYPE 'E'.
+        ELSE.
+          gv_cancel    = abap_false.
+          gv_from_back = abap_false.
+          LEAVE SCREEN.
+        ENDIF.
+      ELSE.
+        gv_cancel    = abap_false.
+        gv_from_back = abap_false.
+        LEAVE SCREEN.
+      ENDIF.
+
+    WHEN OTHERS.
+      "nada
+
+  ENDCASE.
+
+ENDMODULE.

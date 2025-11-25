@@ -1,0 +1,224 @@
+
+FORM f_visualiza_pdf_temp
+  USING lwa_zta1_2 TYPE zsa1_cp1
+        lv_fname   TYPE string.
+
+  DATA: lc_regimen601(3)      TYPE c,
+        lv_formname           TYPE tdsfname VALUE 'ZFISF_DOCTIMB3_VIKO',
+        lwa_control_param     TYPE ssfctrlop,
+        lwa_composer_param    TYPE ssfcompop,
+        lwa_otfdata           TYPE ssfcrescl,
+        lv_band               TYPE c VALUE '',
+        lv_fm_name            TYPE rs38l_fnam,
+        lt_pagos              TYPE ztta1_cp1,
+        lt_fac                TYPE ztta1_cp1,
+        lv_reg_fis            TYPE char5,
+        lv_pais               TYPE t005-intca3,
+        lv_regimen            TYPE char3,
+        lv_otfdata            TYPE TABLE OF itcoo,
+        v_bin_filesize        TYPE i,
+        ls_print_data_to_read TYPE lbbil_print_data_to_read,
+        cf_retcode            TYPE sy-subrc,
+        ls_recipient          TYPE swotobjid,
+        ls_sender             TYPE swotobjid,
+        it_docs               TYPE STANDARD TABLE OF docs,
+        it_lines              TYPE STANDARD TABLE OF tline,
+        lv_uuid               TYPE zfid_uuid_cfdi,
+        lv_ztfetimb           TYPE zfid_fe_tim,
+        lv_dom                TYPE pstlz,
+        lv_rfc_emisor         TYPE paval.
+
+  " --- Para el diálogo de guardado ---
+  DATA: lv_suggest  TYPE string,   "nombre sugerido
+        lv_filename TYPE string,
+        lv_path     TYPE string,
+        lv_fullpath TYPE string,
+        lv_action   TYPE i.
+
+  " Estructuras para el SmartForm
+  DATA: lt_zcp_sovos TYPE STANDARD TABLE OF zcp_sovos,
+        wa_zcp_sovos TYPE zcp_sovos,
+        wa_zcfdit002 TYPE zcfdit002.
+
+  " Recupero datos SD / parámetros impresión
+  PERFORM f_datos_sd.
+
+  SELECT SINGLE low FROM tvarvc INTO lv_formname WHERE name = 'CFDI40CP_PDF'.
+
+  PERFORM set_print_data_to_read USING    lv_formname
+                                CHANGING ls_print_data_to_read
+                                         cf_retcode.
+
+  PERFORM set_print_param
+                        CHANGING lwa_control_param
+                                 lwa_composer_param
+                                 ls_recipient
+                                 ls_sender
+                                 cf_retcode.
+
+  " === Carga de datos Sovos / CP1 para el PDF ===
+  SELECT * FROM zcp_sovos
+         INTO TABLE lt_zcp_sovos
+         WHERE bukrs   = lwa_zta1_2-bukrs
+           AND numcomp = lwa_zta1_2-numcomp.
+
+  IF sy-subrc = 0.
+    READ TABLE lt_zcp_sovos INTO wa_zcp_sovos INDEX 1.
+  ENDIF.
+
+  SELECT * FROM zta1_cp1
+         INTO TABLE lt_pagos
+         WHERE numcomp = lwa_zta1_2-numcomp.
+
+  lt_fac[] = lt_pagos[].
+
+  READ TABLE lt_pagos INDEX 1 INTO DATA(lv_pago).
+  IF sy-subrc = 0.
+    lv_uuid       = lv_pago-uuid_comp.
+    lv_ztfetimb   = lv_pago-ztfetimb.
+    lv_rfc_emisor = lv_pago-rfc_cl.
+  ENDIF.
+
+  READ TABLE t_t001 INTO DATA(pwa_t001) WITH KEY bukrs = lwa_zta1_2-bukrs.
+  IF sy-subrc = 0.
+    READ TABLE t_adrc INTO DATA(pwa_adrc) WITH KEY addrnumber = pwa_t001-adrnr BINARY SEARCH.
+  ENDIF.
+
+  WRITE '601' TO lv_reg_fis.
+
+  " Determina FM del SmartForm
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING  formname = lv_formname
+    IMPORTING  fm_name  = lv_fm_name
+    EXCEPTIONS no_form            = 1
+               no_function_module = 2
+               OTHERS             = 3.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    RETURN.
+  ENDIF.
+
+  " Mapear Sovos -> estructura del SF
+  CLEAR wa_zcfdit002.
+  IF wa_zcp_sovos IS NOT INITIAL.
+    wa_zcfdit002-version          = wa_zcp_sovos-version.
+    wa_zcfdit002-uuid             = wa_zcp_sovos-uuid.
+    wa_zcfdit002-fechatimbrado    = wa_zcp_sovos-fechatimbrado.
+    wa_zcfdit002-nocertificadosat = wa_zcp_sovos-nocertificadosat.
+    wa_zcfdit002-sellocfd         = wa_zcp_sovos-sellocfd.
+    wa_zcfdit002-sellosat         = wa_zcp_sovos-sellosat.
+    wa_zcfdit002-rfcemisor        = wa_zcp_sovos-rfcemisor.
+    wa_zcfdit002-rfcreceptor      = wa_zcp_sovos-rfcreceptor.
+    wa_zcfdit002-total_compr      = wa_zcp_sovos-total_compr.
+    wa_zcfdit002-code_qr          = wa_zcp_sovos-code_qr.
+  ENDIF.
+
+  " Ejecuta SmartForm
+  CALL FUNCTION lv_fm_name
+    EXPORTING
+      archive_index      = toa_dara
+      control_parameters = lwa_control_param
+      output_options     = lwa_composer_param
+      user_settings      = space
+      pwa_clientes       = lwa_zta1_2
+      p_rfc_receptor     = lwa_zta1_2-rfc_cl
+      p_nom_receptor     = lwa_zta1_2-nombre
+      p_rfc_emisor       = lv_rfc_emisor
+      p_nom_emisor       = pwa_t001-butxt
+      p_reg_fis          = lv_reg_fis
+      p_reg_fisr         = lv_regimen
+      p_dom_fis          = lv_dom
+      p_res_fis          = lv_pais
+      p_lug_exp          = pwa_adrc-post_code1
+      pwa_zcfdit002      = wa_zcfdit002
+      p_sust             = lv_band
+      p_uuide            = lv_uuid
+      p_fechat           = lv_ztfetimb
+      pwa_zcp_sovos      = wa_zcp_sovos
+      p_cadena_org       = wa_zcp_sovos-cadena_original
+    IMPORTING
+      job_output_info    = lwa_otfdata
+    TABLES
+      pt_pagos           = lt_pagos
+      pt_fac             = lt_fac
+      pt_fac2            = t_zta1_aux
+      pt_zcp_sovos       = lt_zcp_sovos
+    EXCEPTIONS
+      formatting_error   = 1
+      internal_error     = 2
+      send_error         = 3
+      user_canceled      = 4
+      OTHERS             = 5.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error al ejecutar SmartForm' TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  " Convertir a PDF
+  lv_otfdata[] = lwa_otfdata-otfdata[].
+  CALL FUNCTION 'CONVERT_OTF_2_PDF'
+    IMPORTING bin_filesize           = v_bin_filesize
+    TABLES    otf                    = lv_otfdata
+              doctab_archive         = it_docs
+              lines                  = it_lines
+    EXCEPTIONS err_conv_not_possible = 1
+               OTHERS                = 2.
+  IF sy-subrc <> 0.
+    MESSAGE 'Error al convertir OTF a PDF' TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+  "======================
+  "  Diálogo Guardar Como
+  "======================
+  " Sugerencia: <No.Complem>.pdf (si te pasan un nombre por parámetro, úsalo)
+  IF lv_fname IS NOT INITIAL.
+    lv_suggest = lv_fname.
+  ELSE.
+    lv_suggest = |{ lwa_zta1_2-numcomp }.pdf|.
+  ENDIF.
+*  " Asegura extensión .pdf
+*  IF lv_suggest CP '*.'.
+*  ELSE.
+*    CONCATENATE lv_suggest '.pdf' INTO lv_suggest.
+*  ENDIF.
+
+  CALL METHOD cl_gui_frontend_services=>file_save_dialog
+    EXPORTING
+      default_file_name   = lv_suggest         " <<< ESTA ES LA CLAVE
+      default_extension   = 'pdf'
+      prompt_on_overwrite = abap_true
+      file_filter         = 'PDF Files (*.pdf)|*.pdf'
+    CHANGING
+      filename            = lv_filename
+      path                = lv_path
+      fullpath            = lv_fullpath
+      user_action         = lv_action
+    EXCEPTIONS
+      OTHERS              = 1.
+
+  IF sy-subrc <> 0 OR lv_action <> cl_gui_frontend_services=>action_ok.
+    RETURN.  " usuario canceló
+  ENDIF.
+
+  " Descargar PDF (BIN con tamaño)
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename     = lv_fullpath
+      filetype     = 'BIN'
+      bin_filesize = v_bin_filesize
+    CHANGING
+      data_tab     = it_lines
+    EXCEPTIONS
+      OTHERS       = 1.
+
+  " Abrir el PDF (opcional)
+  CALL METHOD cl_gui_frontend_services=>execute
+    EXPORTING
+      document  = lv_fullpath
+      operation = 'OPEN'
+    EXCEPTIONS
+      OTHERS    = 1.
+
+ENDFORM.

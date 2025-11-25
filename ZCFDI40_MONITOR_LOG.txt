@@ -1,0 +1,2539 @@
+* Patched v7 (REPORT first) on 2025-09-30 02:11:31
+REPORT zcfdi40_monitor_log.
+
+* Patched v6 on 2025-09-30 02:04:24
+"=== Rangos globales para fechas de BD ================================
+DATA: lr_fech_db TYPE RANGE OF vbrk-fkdat.
+DATA: ls_rfech   LIKE LINE OF lr_fech_db.
+TYPES: BEGIN OF ty_log_hdr,
+         bukrs      TYPE zcfdi_xml_log-bukrs,
+         belnr      TYPE zcfdi_xml_log-belnr,
+         gjahr      TYPE zcfdi_xml_log-gjahr,
+         tipo_doc   TYPE zcfdi_xml_log-tipo_doc,
+         created_on TYPE zcfdi_xml_log-created_on,
+         created_at TYPE zcfdi_xml_log-created_at,
+         xml_bytes  TYPE i,  " tamaño del XML_REQ
+         pdf_bytes  TYPE i,  " tamaño del PDF
+       END OF ty_log_hdr.
+
+DATA gt_log_hdr TYPE STANDARD TABLE OF ty_log_hdr.
+
+
+CLASS lcl_pacerr_handler DEFINITION.
+  PUBLIC SECTION.
+    DATA vbeln TYPE vbrk-vbeln.
+    DATA msg   TYPE string.
+    DATA xml   TYPE string.
+    METHODS on_added_function
+                FOR EVENT added_function OF cl_salv_events_table
+      IMPORTING e_salv_function.
+ENDCLASS.
+
+CLASS lcl_pacerr_handler IMPLEMENTATION.
+  METHOD on_added_function.
+    CASE e_salv_function.
+      WHEN 'CPYMSG'.
+        DATA lt_clip TYPE soli_tab.
+        DATA lv_rc   TYPE i.
+        APPEND VALUE soli( line = me->msg ) TO lt_clip.
+        TRY.
+            cl_gui_frontend_services=>clipboard_export(
+              IMPORTING data = lt_clip
+              CHANGING  rc   = lv_rc ).
+            IF lv_rc = 0.
+              MESSAGE 'Mensaje copiado al portapapeles.' TYPE 'S'.
+            ELSE.
+              MESSAGE |No se pudo copiar (rc={ lv_rc }).| TYPE 'S'.
+            ENDIF.
+          CATCH cx_root.
+            MESSAGE 'No se pudo copiar al portapapeles.' TYPE 'S'.
+        ENDTRY.
+
+      WHEN 'XML'.
+        IF me->xml IS INITIAL.
+          MESSAGE 'No hay XML de error disponible.' TYPE 'S'.
+        ELSE.
+          DATA lv_defname TYPE string.
+          CONCATENATE 'CFDI_Error_Timbrado_' me->vbeln '.xml' INTO lv_defname.
+          PERFORM save_and_open_xml USING me->xml lv_defname.
+        ENDIF.
+    ENDCASE.
+
+  ENDMETHOD.
+ENDCLASS.
+
+INCLUDE <icon>.
+TYPE-POOLS: slis.
+
+TABLES: kna1, vbrk.
+
+" Tablas en memoria para HEAD/DET
+TYPES: tt_head_cfdi TYPE STANDARD TABLE OF zcfdi_head_40 WITH DEFAULT KEY,
+       tt_det_cfdi  TYPE STANDARD TABLE OF zcfdi_det_40  WITH DEFAULT KEY.
+
+DATA: gt_positions   TYPE vbrp_tab,
+      gv_last_filter TYPE c LENGTH 3 VALUE 'ALL',
+      gt_head_cfdi   TYPE tt_head_cfdi,
+      gt_det_cfdi    TYPE tt_det_cfdi.
+DATA: gt_alv_filt TYPE lvc_t_filt,
+      gt_alv_sort TYPE lvc_t_sort.
+
+*---------------------------------------------------------------------*
+* Selección
+*---------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+SELECT-OPTIONS s_bukrs FOR vbrk-bukrs.
+SELECT-OPTIONS s_kunnr FOR kna1-kunnr.
+SELECT-OPTIONS s_vbeln FOR vbrk-vbeln NO INTERVALS.
+SELECT-OPTIONS s_fech  FOR sy-datum.
+
+PARAMETERS p_ftim AS CHECKBOX.
+SELECT-OPTIONS s_mon  FOR  vbrk-waerk.
+SELECTION-SCREEN END OF BLOCK b1.
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-002.
+PARAMETERS: p_timb AS CHECKBOX USER-COMMAND upd, " Timbrados
+            p_err  AS CHECKBOX,                 " Error timb
+            p_sin  AS CHECKBOX.                 " Sin solicitud
+SELECTION-SCREEN END OF BLOCK b2.
+* text-002 = 'Estado'.
+
+
+*text-001 = 'Filtros'.
+
+TYPES: BEGIN OF ty_out,
+         " Íconos
+         req_icon       TYPE icon_d,
+         error_tim_icon TYPE icon_d,
+         timb_icon      TYPE icon_d,
+         fact_ico       TYPE icon_d,
+
+         " Datos clave
+         factura        TYPE vbrk-vbeln,
+         fecha          TYPE sy-datum,
+         kunnr          TYPE kna1-kunnr,
+         nombre         TYPE kna1-name1,
+         total          TYPE decfloat34,
+         moneda         TYPE waers,
+         estado         TYPE char12,
+
+         " Info log existente
+         status_icon    TYPE icon_d,
+         has_error      TYPE c LENGTH 1,
+         error_icon     TYPE icon_d,
+         last_tdoc      TYPE char6,
+         last_on        TYPE sy-datum,
+         last_at        TYPE sy-uzeit,
+
+         " Nuevos campos solicitados
+         uuid           TYPE zuuid,
+         timb_on        TYPE sy-datum,     " Fecha timbrado
+         timb_at        TYPE sy-uzeit,     " Hora timbrado
+         vkorg          TYPE vbrk-vkorg,   " Organización de ventas
+         vtweg          TYPE vbrk-vtweg,   " Canal distribución
+         spart          TYPE vbrk-spart,   " Sector
+         tipocambioxml  TYPE string,   " Tipo de cambio (de HEAD)
+         bukrs          TYPE vbrk-bukrs,
+         gjahr          TYPE vbrk-gjahr,
+       END OF ty_out.
+
+
+TYPES: BEGIN OF ty_lastlog,
+         tipo_doc   TYPE zcfdi_xml_log-tipo_doc,
+         created_on TYPE zcfdi_xml_log-created_on,
+         created_at TYPE zcfdi_xml_log-created_at,
+       END OF ty_lastlog.
+
+DATA: gt_out     TYPE STANDARD TABLE OF ty_out,
+      gt_out_all TYPE STANDARD TABLE OF ty_out,
+      gs_out     TYPE ty_out,
+      gt_fcat    TYPE slis_t_fieldcat_alv,
+      gs_layout  TYPE slis_layout_alv.
+
+*---------------------------------------------------------------------*
+* START-OF-SELECTION
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+
+  PERFORM get_data.
+
+  IF gt_out IS INITIAL.
+    MESSAGE 'Sin datos para los filtros dados.' TYPE 'S'.
+    EXIT.
+  ENDIF.
+  PERFORM display_grid.
+
+FORM build_fieldcat.
+  DATA ls_fcat TYPE slis_fieldcat_alv.
+  REFRESH gt_fcat.
+
+  " --- Iconos (hotspot)
+  CLEAR ls_fcat. ls_fcat-fieldname = 'FACT_ICO'.       ls_fcat-seltext_l = '¿Quieres Timbrar?'.   ls_fcat-outputlen = 20. ls_fcat-icon = 'X'. ls_fcat-hotspot = 'X'. APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'TIMB_ICON'.      ls_fcat-seltext_l = 'TimbreFiscal'.          ls_fcat-outputlen = 10. ls_fcat-icon = 'X'. ls_fcat-hotspot = 'X'. APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'REQ_ICON'.       ls_fcat-seltext_l = 'Request'.        ls_fcat-outputlen = 10. ls_fcat-icon = 'X'. ls_fcat-hotspot = 'X'. APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'ERROR_TIM_ICON'. ls_fcat-seltext_l = 'Error PAC'.     ls_fcat-outputlen = 10. ls_fcat-icon = 'X'. ls_fcat-hotspot = 'X'. APPEND ls_fcat TO gt_fcat.
+
+  " --- Datos clave
+  CLEAR ls_fcat. ls_fcat-fieldname = 'FACTURA'.     ls_fcat-seltext_l = 'Factura'.        ls_fcat-outputlen = 12. ls_fcat-hotspot = 'X'. APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'VKORG'.           ls_fcat-seltext_l = 'Org.Vtas'.        ls_fcat-outputlen = 4.                       APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'VTWEG'.           ls_fcat-seltext_l = 'Canal'.           ls_fcat-outputlen = 2.                       APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'SPART'.           ls_fcat-seltext_l = 'Sector'.          ls_fcat-outputlen = 2.                       APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat. ls_fcat-fieldname = 'FECHA'.       ls_fcat-seltext_l = 'Fecha'.          ls_fcat-outputlen = 10.                      APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'KUNNR'.       ls_fcat-seltext_l = 'Cliente'.        ls_fcat-outputlen = 10.                      APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'NOMBRE'.      ls_fcat-seltext_l = 'Nombre cliente'. ls_fcat-outputlen = 35.                      APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'TOTAL'.       ls_fcat-seltext_l = 'Total'.          ls_fcat-outputlen = 17.                      APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'MONEDA'.      ls_fcat-seltext_l = 'Moneda'.         ls_fcat-outputlen = 5.                       APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'ESTADO'.      ls_fcat-seltext_l = 'Estado'.         ls_fcat-outputlen = 14.                      APPEND ls_fcat TO gt_fcat.
+
+  " --- Info de log
+  CLEAR ls_fcat. ls_fcat-fieldname = 'LAST_TDOC'.   ls_fcat-seltext_l = 'Últ.Log'.        ls_fcat-outputlen = 6.                       APPEND ls_fcat TO gt_fcat.
+*  CLEAR ls_fcat. ls_fcat-fieldname = 'LAST_ON'.     ls_fcat-seltext_l = 'Fecha Log'.      ls_fcat-outputlen = 10.                      APPEND ls_fcat TO gt_fcat.
+*  CLEAR ls_fcat. ls_fcat-fieldname = 'LAST_AT'.     ls_fcat-seltext_l = 'Hora Log'.       ls_fcat-outputlen = 8.                       APPEND ls_fcat TO gt_fcat.
+
+  " --- Nuevos (solo TIPOCAMBIOXML)
+  CLEAR ls_fcat. ls_fcat-fieldname = 'UUID'.            ls_fcat-seltext_l = 'UUID'.            ls_fcat-outputlen = 40.                      APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'TIMB_ON'.         ls_fcat-seltext_l = 'Fec. Timb.'.      ls_fcat-outputlen = 10.                      APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'TIMB_AT'.         ls_fcat-seltext_l = 'Hora Timb.'.      ls_fcat-outputlen = 8.                       APPEND ls_fcat TO gt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'TIPOCAMBIOXML'.   ls_fcat-seltext_l = 'Tipo cambio XML'. ls_fcat-outputlen = 16.                      APPEND ls_fcat TO gt_fcat.
+
+  gs_layout-colwidth_optimize = 'X'.
+ENDFORM.
+*---------------------------------------------------------------------*
+* Mostrar ALV GRID
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+* Mostrar ALV GRID (LVC con autoajuste de columnas)
+*---------------------------------------------------------------------*
+FORM display_grid.
+
+  " Construyes tu SLIS fieldcat como siempre
+  PERFORM build_fieldcat.
+
+  " ---- Convertimos SLIS -> LVC (mapeo simple) ----
+  DATA: gt_fcat_lvc TYPE lvc_t_fcat,
+        gs_fcat_lvc TYPE lvc_s_fcat,
+        ls_slis     TYPE slis_fieldcat_alv.
+
+  REFRESH gt_fcat_lvc.
+  LOOP AT gt_fcat INTO ls_slis.
+    CLEAR gs_fcat_lvc.
+    gs_fcat_lvc-fieldname = ls_slis-fieldname.
+    gs_fcat_lvc-coltext   = ls_slis-seltext_l.
+    gs_fcat_lvc-outputlen = ls_slis-outputlen.
+    gs_fcat_lvc-hotspot   = ls_slis-hotspot.
+    gs_fcat_lvc-icon      = ls_slis-icon.
+    " Si usas key/justificación/etc., mapea aquí más atributos según requieras
+    APPEND gs_fcat_lvc TO gt_fcat_lvc.
+  ENDLOOP.
+
+  " ---- Layout LVC con auto-fit ----
+  DATA gs_layout_lvc TYPE lvc_s_layo.
+  CLEAR gs_layout_lvc.
+  gs_layout_lvc-cwidth_opt = 'X'.   " <= Autoajustar columnas
+  gs_layout_lvc-zebra      = 'X'.
+
+  " ---- Mostrar GRID LVC ----
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+    EXPORTING
+      i_callback_program       = sy-repid
+      i_callback_pf_status_set = 'PF_STATUS_SET'
+      i_callback_user_command  = 'USER_COMMAND'
+      is_layout_lvc            = gs_layout_lvc
+      it_fieldcat_lvc          = gt_fcat_lvc
+      i_save                   = 'A'
+    TABLES
+      t_outtab                 = gt_out
+    EXCEPTIONS
+      program_error            = 1
+      OTHERS                   = 2.
+
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* PF-STATUS
+*---------------------------------------------------------------------*
+FORM pf_status_set USING pt_extab TYPE slis_t_extab.
+  SET PF-STATUS 'ZCFDIGRD' EXCLUDING pt_extab.
+ENDFORM.
+FORM user_command USING p_ucomm TYPE sy-ucomm
+                        rs_self TYPE slis_selfield.
+
+  DATA: lv_idx    TYPE sy-tabix,
+        lv_vbeln  TYPE vbrk-vbeln,
+        ls_out    TYPE ty_out,
+        lv_result TYPE c.            " 'T' timbrado, 'E' error, 'N' sin cambios
+
+  CASE p_ucomm.
+
+    WHEN '&F03' OR '&F12' OR '&F15' OR 'BACK' OR 'EXIT' OR 'CANCEL'.
+      rs_self-exit = 'X'.
+      RETURN.
+
+    WHEN '&IC1'.
+      READ TABLE gt_out INDEX rs_self-tabindex INTO ls_out.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+
+      CASE rs_self-fieldname.
+
+        WHEN 'FACTURA'.
+          lv_vbeln = ls_out-factura.
+          CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+            EXPORTING
+              input  = lv_vbeln
+            IMPORTING
+              output = lv_vbeln.
+          IF lv_vbeln IS INITIAL.
+            MESSAGE 'Número de factura vacío.' TYPE 'S' DISPLAY LIKE 'E'.
+            RETURN.
+          ENDIF.
+          SET PARAMETER ID 'VF' FIELD lv_vbeln.
+          CALL TRANSACTION 'VF03' AND SKIP FIRST SCREEN.
+          rs_self-refresh = 'X'.
+
+
+
+        WHEN 'REQ_ICON' OR 'STATUS_ICON'.
+          " ⬇️ abrir XML (prioridad TI→RQ→ER); 4º parámetro opcional
+          PERFORM open_xml_from_log    USING ls_out-factura ls_out-bukrs ls_out-gjahr.
+
+
+        WHEN 'ERROR_TIM_ICON' OR 'ERROR_ICON'.
+          " ⬇️ abrir XML de error (ER)
+          PERFORM open_xml_from_error  USING ls_out-factura ls_out-bukrs ls_out-gjahr.
+
+
+        WHEN 'TIMB_ICON'.
+          PERFORM open_xml_timb
+                  USING ls_out-factura ls_out-bukrs ls_out-gjahr.
+
+        WHEN 'FACT_ICO'. " Ejecutar timbrado solo si NO está timbrada
+          IF ls_out-estado = 'Timbrada'.
+            MESSAGE 'La factura ya está timbrada (TI).' TYPE 'S'.
+            RETURN.
+          ENDIF.
+
+          CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+            EXPORTING
+              percentage = 10
+              text       = |Timbrando { ls_out-factura }...|.
+
+          CLEAR lv_result.
+          PERFORM pacsovos_fac USING    ls_out-factura
+                                        ls_out-bukrs
+                                        ls_out-gjahr
+                               CHANGING lv_result.       "<<< devuelve T / E / N
+
+          "---- Refresh inteligente ---------------------------------
+          CASE lv_result.
+            WHEN 'T'.   " Timbró → recargar datos (pero conservando filtros de barra)
+              PERFORM get_data.
+              PERFORM apply_current_filter.
+              rs_self-refresh = 'X'.
+
+            WHEN 'E'.   " Error → NO recargar; solo actualizar la fila
+              PERFORM mark_row_error USING rs_self-tabindex.
+
+            WHEN OTHERS. " N/sin cambios → no hagas nada
+          ENDCASE.
+          "-----------------------------------------------------------
+
+      ENDCASE.
+
+    WHEN 'LOG'.
+      IF rs_self-tabindex IS INITIAL.
+        GET CURSOR LINE lv_idx.
+      ELSE.
+        lv_idx = rs_self-tabindex.
+      ENDIF.
+      IF lv_idx > 0.
+        READ TABLE gt_out INDEX lv_idx INTO ls_out.
+        IF sy-subrc = 0.
+          PERFORM show_log USING ls_out-factura ls_out-bukrs ls_out-gjahr.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'GRN'.
+      gv_last_filter = 'GRN'.
+      REFRESH gt_out.
+      LOOP AT gt_out_all INTO ls_out
+        WHERE estado = 'Timbrada'
+           OR estado = 'Éxito (RQ)'.
+        APPEND ls_out TO gt_out.
+      ENDLOOP.
+      rs_self-refresh = 'X'.
+
+    WHEN 'YEL'.
+      gv_last_filter = 'YEL'.
+      REFRESH gt_out.
+      LOOP AT gt_out_all INTO ls_out
+        WHERE estado = 'En proceso'
+           OR estado = 'Sin solicitud'.
+        APPEND ls_out TO gt_out.
+      ENDLOOP.
+      rs_self-refresh = 'X'.
+
+    WHEN 'RED'.
+      gv_last_filter = 'RED'.
+      REFRESH gt_out.
+      LOOP AT gt_out_all INTO ls_out
+        WHERE estado = 'Error'.
+        APPEND ls_out TO gt_out.
+      ENDLOOP.
+      rs_self-refresh = 'X'.
+
+    WHEN 'ALL'.
+      gv_last_filter = 'ALL'.
+      gt_out[] = gt_out_all[].
+      rs_self-refresh = 'X'.
+
+  ENDCASE.
+ENDFORM.
+
+
+
+
+*---------------------------------------------------------------------*
+* Sublista LOG (ALV LIST simple)
+*---------------------------------------------------------------------*
+FORM show_log USING pv_vbeln TYPE vbrk-vbeln
+                     pv_bukrs TYPE vbrk-bukrs
+                     pv_gjahr TYPE vbrk-gjahr.
+
+  TYPES: BEGIN OF ty_log,
+           tipo_doc   TYPE zcfdi_xml_log-tipo_doc,
+           created_on TYPE zcfdi_xml_log-created_on,
+           created_at TYPE zcfdi_xml_log-created_at,
+         END OF ty_log.
+
+  DATA: lt_log    TYPE STANDARD TABLE OF ty_log,
+        lt_fcat2  TYPE slis_t_fieldcat_alv,
+        ls_fcat2  TYPE slis_fieldcat_alv,
+        ls_layout TYPE slis_layout_alv.
+
+  "=== Fechas: preparar rango que irá al SELECT de VBRK =================
+  DATA: lr_fech_db TYPE RANGE OF vbrk-fkdat,
+        ls_rfech   LIKE LINE OF lr_fech_db.
+
+  lr_fech_db[] = s_fech[].
+
+  IF p_ftim = abap_true AND s_fech[] IS NOT INITIAL.
+    REFRESH lr_fech_db.
+    CLEAR ls_rfech.
+    ls_rfech-sign   = 'I'.
+    ls_rfech-option = 'BT'.
+    ls_rfech-low    = '00000000'.
+    ls_rfech-high   = '99991231'.
+    APPEND ls_rfech TO lr_fech_db.
+  ENDIF.
+  "=====================================================================
+  SELECT tipo_doc created_on created_at
+      INTO TABLE lt_log
+      FROM zcfdi_xml_log
+      WHERE belnr = pv_vbeln
+        AND bukrs = pv_bukrs
+        AND gjahr = pv_gjahr
+      ORDER BY created_on DESCENDING created_at DESCENDING.
+
+  IF lt_log IS INITIAL.
+    MESSAGE 'Sin LOG para la factura seleccionada.' TYPE 'S'.
+    EXIT.
+  ENDIF.
+
+  REFRESH lt_fcat2.
+  CLEAR ls_fcat2. ls_fcat2-fieldname = 'TIPO_DOC'.   ls_fcat2-seltext_l = 'Tipo'.  ls_fcat2-outputlen = 6.  APPEND ls_fcat2 TO lt_fcat2.
+  CLEAR ls_fcat2. ls_fcat2-fieldname = 'CREATED_ON'. ls_fcat2-seltext_l = 'Fecha'. ls_fcat2-outputlen = 10. APPEND ls_fcat2 TO lt_fcat2.
+  CLEAR ls_fcat2. ls_fcat2-fieldname = 'CREATED_AT'. ls_fcat2-seltext_l = 'Hora'.  ls_fcat2-outputlen = 8.  APPEND ls_fcat2 TO lt_fcat2.
+
+  CLEAR ls_layout.
+  ls_layout-colwidth_optimize = 'X'.
+
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = sy-repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fcat2
+      i_save             = 'A'
+    TABLES
+      t_outtab           = lt_log
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+ENDFORM.
+
+
+
+
+
+
+
+
+
+*---------------------------------------------------------------------*
+* GET_DATA  (HEAD manda, LOG complementa) + filtro por moneda s_mon
+*---------------------------------------------------------------------*
+FORM get_data.
+
+  TYPE-POOLS: icon.
+
+  "--------------- Tipos auxiliares -----------------
+  TYPES: BEGIN OF ty_vbrk_sel,
+           vbeln TYPE vbrk-vbeln,
+           bukrs TYPE vbrk-bukrs,
+           gjahr TYPE vbrk-gjahr,
+           fkdat TYPE vbrk-fkdat,
+           kunrg TYPE vbrk-kunrg,
+           waerk TYPE vbrk-waerk,
+           netwr TYPE vbrk-netwr,
+           vkorg TYPE vbrk-vkorg,
+           vtweg TYPE vbrk-vtweg,
+           spart TYPE vbrk-spart,
+         END OF ty_vbrk_sel.
+
+  TYPES: BEGIN OF ty_key_log,
+           belnr TYPE zcfdi_xml_log-belnr,
+           bukrs TYPE zcfdi_xml_log-bukrs,
+           gjahr TYPE zcfdi_xml_log-gjahr,
+         END OF ty_key_log.
+
+  TYPES: BEGIN OF ty_key_head,
+           factura TYPE zcfdi_head_40-factura,
+           bukrs   TYPE zcfdi_head_40-bukrs,
+           gjahr   TYPE zcfdi_head_40-gjahr,
+         END OF ty_key_head.
+
+  TYPES: BEGIN OF ty_knam,
+           kunnr TYPE kna1-kunnr,
+           name1 TYPE kna1-name1,
+         END OF ty_knam.
+
+  TYPES: BEGIN OF ty_flag_key,
+           belnr TYPE zcfdi_xml_log-belnr,
+           bukrs TYPE zcfdi_xml_log-bukrs,
+           gjahr TYPE zcfdi_xml_log-gjahr,
+         END OF ty_flag_key.
+
+  TYPES: BEGIN OF ty_ti_idx,
+           belnr      TYPE zcfdi_xml_log-belnr,
+           bukrs      TYPE zcfdi_xml_log-bukrs,
+           gjahr      TYPE zcfdi_xml_log-gjahr,
+           created_on TYPE zcfdi_xml_log-created_on,
+           created_at TYPE zcfdi_xml_log-created_at,
+         END OF ty_ti_idx.
+
+  "--------------- Tablas de trabajo ----------------
+  DATA: lt_vbrk     TYPE STANDARD TABLE OF ty_vbrk_sel WITH EMPTY KEY,
+        ls_vbrk     TYPE ty_vbrk_sel,
+
+        lt_keys_l   TYPE SORTED TABLE OF ty_key_log
+                    WITH UNIQUE KEY belnr bukrs gjahr,
+        lt_keys_h   TYPE SORTED TABLE OF ty_key_head
+                    WITH UNIQUE KEY factura bukrs gjahr,
+        ls_kl       TYPE ty_key_log,
+        ls_kh       TYPE ty_key_head,
+
+        lt_log_all  TYPE STANDARD TABLE OF zcfdi_xml_log WITH EMPTY KEY,
+        lt_log_last TYPE STANDARD TABLE OF zcfdi_xml_log WITH EMPTY KEY,
+        ls_log      TYPE zcfdi_xml_log,
+
+        lt_head     TYPE STANDARD TABLE OF zcfdi_head_40 WITH EMPTY KEY,
+        ls_head     TYPE zcfdi_head_40,
+
+        lt_head_h   TYPE HASHED  TABLE OF zcfdi_head_40
+                    WITH UNIQUE KEY factura bukrs gjahr,
+
+        lt_last_h   TYPE HASHED  TABLE OF zcfdi_xml_log
+                    WITH UNIQUE KEY belnr bukrs gjahr,
+
+        lt_kunnr    TYPE SORTED TABLE OF kna1-kunnr
+                    WITH UNIQUE KEY table_line,
+        lt_knam     TYPE STANDARD TABLE OF ty_knam WITH EMPTY KEY,
+        ls_knam     TYPE ty_knam,
+
+        lt_er_keys  TYPE HASHED  TABLE OF ty_flag_key
+                    WITH UNIQUE KEY belnr bukrs gjahr,
+        lt_rq_keys  TYPE HASHED  TABLE OF ty_flag_key
+                    WITH UNIQUE KEY belnr bukrs gjahr,
+        lt_ti_idx   TYPE HASHED  TABLE OF ty_ti_idx
+                    WITH UNIQUE KEY belnr bukrs gjahr,
+        ls_ti_idx   TYPE ty_ti_idx.
+
+  DATA: lv_gjahr_key TYPE gjahr,
+        lv_gjahr     TYPE gjahr.
+
+  " Para extraer TipoCambio del XML timbrado (fallback)
+  DATA: lv_xml_str   TYPE string,
+        lv_tcxml_str TYPE string,
+        lv_pos_start TYPE i,
+        lv_pos_end   TYPE i,
+        lv_len       TYPE i.
+
+  " Asignación dinámica para TC numérico (si existiera en OUT/HEAD)
+  FIELD-SYMBOLS: <fs_tc_out>  TYPE any,
+                 <fs_tc_head> TYPE any.
+
+  CONSTANTS: c_mxn TYPE waers VALUE 'MXN'.
+
+  "--------------- RANGOS LOCALES (copias de S_*) --------------------
+  DATA: lr_vbeln TYPE RANGE OF vbrk-vbeln,
+        lr_bukrs TYPE RANGE OF vbrk-bukrs,
+        lr_fech  TYPE RANGE OF vbrk-fkdat,
+        lr_kunnr TYPE RANGE OF vbrk-kunrg,
+        lr_mon   TYPE RANGE OF vbrk-waerk.
+
+  DATA: ls_rvbeln LIKE LINE OF lr_vbeln,
+        ls_rbukrs LIKE LINE OF lr_bukrs,
+        ls_rfech  LIKE LINE OF lr_fech,
+        ls_rkunnr LIKE LINE OF lr_kunnr,
+        ls_rmon   LIKE LINE OF lr_mon,
+        ls_smon   LIKE LINE OF s_mon.
+
+  CLEAR: gt_out, gt_out_all.
+
+  " Copiar select-options a rangos locales
+  lr_vbeln[] = s_vbeln[].
+  lr_bukrs[] = s_bukrs[].
+  lr_fech[]  = s_fech[].
+  lr_kunnr[] = s_kunnr[].
+
+  " Moneda: normalizar a mayúsculas
+  REFRESH lr_mon.
+  LOOP AT s_mon INTO ls_smon.
+    CLEAR ls_rmon.
+    ls_rmon-sign   = ls_smon-sign.
+    ls_rmon-option = ls_smon-option.
+    ls_rmon-low    = ls_smon-low.
+    ls_rmon-high   = ls_smon-high.
+    TRANSLATE ls_rmon-low  TO UPPER CASE.
+    TRANSLATE ls_rmon-high TO UPPER CASE.
+    APPEND ls_rmon TO lr_mon.
+  ENDLOOP.
+
+  " Si algún rango está vacío, darle intervalo "todo"
+  IF lr_vbeln[] IS INITIAL.
+    CLEAR ls_rvbeln. ls_rvbeln-sign = 'I'. ls_rvbeln-option = 'BT'.
+    ls_rvbeln-low  = '0000000000'. ls_rvbeln-high = '9999999999'.
+    APPEND ls_rvbeln TO lr_vbeln.
+  ENDIF.
+
+  IF lr_bukrs[] IS INITIAL.
+    CLEAR ls_rbukrs. ls_rbukrs-sign = 'I'. ls_rbukrs-option = 'BT'.
+    ls_rbukrs-low  = '0000'. ls_rbukrs-high = 'ZZZZ'.
+    APPEND ls_rbukrs TO lr_bukrs.
+  ENDIF.
+
+  IF lr_fech[] IS INITIAL.
+    CLEAR ls_rfech. ls_rfech-sign = 'I'. ls_rfech-option = 'BT'.
+    ls_rfech-low  = '00000000'. ls_rfech-high = '99991231'.
+    APPEND ls_rfech TO lr_fech.
+  ENDIF.
+
+  IF lr_kunnr[] IS INITIAL.
+    CLEAR ls_rkunnr. ls_rkunnr-sign = 'I'. ls_rkunnr-option = 'BT'.
+    ls_rkunnr-low  = '0000000000'. ls_rkunnr-high = '9999999999'.
+    APPEND ls_rkunnr TO lr_kunnr.
+  ENDIF.
+
+  IF lr_mon[] IS INITIAL.
+    CLEAR ls_rmon. ls_rmon-sign = 'I'. ls_rmon-option = 'BT'.
+    ls_rmon-low  = ' '. ls_rmon-high = 'ZZZZZ'.
+    APPEND ls_rmon TO lr_mon.
+  ENDIF.
+
+  "--------------- 1) Facturas base (VBRK) ---------------
+  PERFORM prepare_fech_db.
+  SELECT vbeln bukrs gjahr fkdat kunrg waerk netwr vkorg vtweg spart
+    INTO TABLE lt_vbrk
+    FROM vbrk
+    WHERE vbeln IN lr_vbeln
+      AND bukrs IN lr_bukrs
+      AND fkdat IN lr_fech_db
+      AND kunrg IN lr_kunnr
+      AND waerk IN lr_mon.
+
+  IF lt_vbrk IS INITIAL.
+    EXIT.
+  ENDIF.
+
+  "--------------- 2) Llaves para HEAD y LOG ------------
+  LOOP AT lt_vbrk INTO ls_vbrk.
+    IF ls_vbrk-gjahr IS INITIAL.
+      lv_gjahr_key = ls_vbrk-fkdat(4).
+    ELSE.
+      lv_gjahr_key = ls_vbrk-gjahr.
+    ENDIF.
+
+    ls_kh-factura = ls_vbrk-vbeln.
+    ls_kh-bukrs   = ls_vbrk-bukrs.
+    ls_kh-gjahr   = lv_gjahr_key.
+    INSERT ls_kh INTO TABLE lt_keys_h.
+
+    ls_kl-belnr = ls_vbrk-vbeln.
+    ls_kl-bukrs = ls_vbrk-bukrs.
+    ls_kl-gjahr = lv_gjahr_key.
+    INSERT ls_kl INTO TABLE lt_keys_l.
+
+    INSERT ls_vbrk-kunrg INTO TABLE lt_kunnr.
+  ENDLOOP.
+
+  "--------------- 3) HEAD (LA QUE MANDA) ---------------
+  IF NOT lt_keys_h IS INITIAL.
+    SELECT *
+      INTO TABLE lt_head
+      FROM zcfdi_head_40
+      FOR ALL ENTRIES IN lt_keys_h
+      WHERE factura = lt_keys_h-factura
+        AND bukrs   = lt_keys_h-bukrs
+        AND gjahr   = lt_keys_h-gjahr.
+    IF NOT lt_head IS INITIAL.
+      lt_head_h[] = lt_head[].
+    ENDIF.
+  ENDIF.
+
+  "--------------- 4) LOGs (complemento) ---------------
+  IF NOT lt_keys_l IS INITIAL.
+    SELECT *
+      INTO TABLE lt_log_all
+      FROM zcfdi_xml_log
+      FOR ALL ENTRIES IN lt_keys_l
+      WHERE belnr = lt_keys_l-belnr
+        AND bukrs = lt_keys_l-bukrs
+        AND gjahr = lt_keys_l-gjahr.
+
+    IF NOT lt_log_all IS INITIAL.
+      SORT lt_log_all BY belnr bukrs gjahr created_on DESCENDING created_at DESCENDING.
+      lt_log_last[] = lt_log_all[].
+      DELETE ADJACENT DUPLICATES FROM lt_log_last COMPARING belnr bukrs gjahr.
+      lt_last_h[] = lt_log_last[].
+
+      CLEAR: lt_er_keys, lt_rq_keys, lt_ti_idx.
+      LOOP AT lt_log_all INTO ls_log.
+        CASE ls_log-tipo_doc.
+          WHEN 'TI'.
+            READ TABLE lt_ti_idx WITH TABLE KEY
+                 belnr = ls_log-belnr bukrs = ls_log-bukrs gjahr = ls_log-gjahr
+                 TRANSPORTING NO FIELDS.
+            IF sy-subrc <> 0.
+              ls_ti_idx-belnr      = ls_log-belnr.
+              ls_ti_idx-bukrs      = ls_log-bukrs.
+              ls_ti_idx-gjahr      = ls_log-gjahr.
+              ls_ti_idx-created_on = ls_log-created_on.
+              ls_ti_idx-created_at = ls_log-created_at.
+              INSERT ls_ti_idx INTO TABLE lt_ti_idx.
+            ENDIF.
+          WHEN 'ER'.
+            INSERT VALUE ty_flag_key( belnr = ls_log-belnr bukrs = ls_log-bukrs gjahr = ls_log-gjahr )
+              INTO TABLE lt_er_keys.
+          WHEN 'RQ'.
+            INSERT VALUE ty_flag_key( belnr = ls_log-belnr bukrs = ls_log-bukrs gjahr = ls_log-gjahr )
+              INTO TABLE lt_rq_keys.
+        ENDCASE.
+      ENDLOOP.
+    ENDIF.
+  ENDIF.
+
+  "--------------- 5) Clientes -------------------
+  IF NOT lt_kunnr IS INITIAL.
+    SELECT kunnr name1
+      INTO TABLE lt_knam
+      FROM kna1
+      FOR ALL ENTRIES IN lt_kunnr
+      WHERE kunnr = lt_kunnr-table_line.
+    SORT lt_knam BY kunnr.
+  ENDIF.
+
+  "--------------- 6) Construcción de salida -------
+  DATA lv_has_er TYPE abap_bool.
+  DATA lv_has_rq TYPE abap_bool.
+
+  LOOP AT lt_vbrk INTO ls_vbrk.
+
+    IF ls_vbrk-gjahr IS INITIAL.
+      lv_gjahr = ls_vbrk-fkdat(4).
+    ELSE.
+      lv_gjahr = ls_vbrk-gjahr.
+    ENDIF.
+
+    CLEAR gs_out.
+    gs_out-factura = ls_vbrk-vbeln.
+    gs_out-bukrs   = ls_vbrk-bukrs.
+    gs_out-gjahr   = lv_gjahr.
+    gs_out-fecha   = ls_vbrk-fkdat.
+    gs_out-kunnr   = ls_vbrk-kunrg.
+    gs_out-total   = ls_vbrk-netwr.
+    gs_out-moneda  = ls_vbrk-waerk.
+    gs_out-vkorg   = ls_vbrk-vkorg.
+    gs_out-vtweg   = ls_vbrk-vtweg.
+    gs_out-spart   = ls_vbrk-spart.
+
+    READ TABLE lt_knam INTO ls_knam WITH KEY kunnr = gs_out-kunnr BINARY SEARCH.
+    IF sy-subrc = 0.
+      gs_out-nombre = ls_knam-name1.
+    ENDIF.
+
+    " Default TipoCambioXML: 1 si MXN
+    IF gs_out-moneda = c_mxn.
+      gs_out-tipocambioxml = '1'.
+    ELSE.
+      CLEAR gs_out-tipocambioxml.
+    ENDIF.
+
+    CLEAR: gs_out-req_icon, gs_out-error_tim_icon, gs_out-timb_icon, gs_out-fact_ico,
+           gs_out-uuid, gs_out-timb_on, gs_out-timb_at, gs_out-estado, gs_out-status_icon,
+           gs_out-last_tdoc, gs_out-last_on, gs_out-last_at.
+
+    " ===== A) HEAD MANDA: si existe en HEAD → Timbrada =====
+    READ TABLE lt_head_h INTO ls_head
+         WITH KEY factura = ls_vbrk-vbeln bukrs = ls_vbrk-bukrs gjahr = lv_gjahr.
+    IF sy-subrc = 0.
+      gs_out-estado      = 'Timbrada'.
+      gs_out-status_icon = icon_led_green.
+      gs_out-timb_icon   = icon_led_green.
+
+      IF ls_head-uuid IS NOT INITIAL.
+        gs_out-uuid = ls_head-uuid.
+      ENDIF.
+      IF ls_head-vkorg IS NOT INITIAL. gs_out-vkorg = ls_head-vkorg. ENDIF.
+      IF ls_head-vtweg IS NOT INITIAL. gs_out-vtweg = ls_head-vtweg. ENDIF.
+      IF ls_head-spart IS NOT INITIAL. gs_out-spart = ls_head-spart. ENDIF.
+
+      " --- TIPOCAMBIOXML (HEAD manda; fallback XML) ---
+      IF gs_out-moneda = c_mxn.
+        gs_out-tipocambioxml = '1'.
+      ELSEIF ls_head-tipocambioxml IS NOT INITIAL.
+        gs_out-tipocambioxml = ls_head-tipocambioxml.
+      ELSEIF ls_head-xml_timb IS NOT INITIAL.
+        CLEAR: lv_xml_str, lv_tcxml_str, lv_pos_start, lv_pos_end, lv_len.
+        CALL FUNCTION 'ECATT_CONV_XSTRING_TO_STRING'
+          EXPORTING
+            im_xstring  = ls_head-xml_timb
+            im_encoding = 'UTF-8'
+          IMPORTING
+            ex_string   = lv_xml_str.
+        PERFORM sanitizar_xml_final CHANGING lv_xml_str.
+
+        IF sy-subrc = 0 AND lv_xml_str IS NOT INITIAL.
+          FIND FIRST OCCURRENCE OF 'TipoCambio="' IN lv_xml_str.
+          IF sy-subrc = 0.
+            lv_pos_start = sy-fdpos + 12.
+            lv_pos_end   = lv_pos_start.
+            WHILE lv_pos_end < strlen( lv_xml_str ) AND lv_xml_str+lv_pos_end(1) <> '"'.
+              lv_pos_end = lv_pos_end + 1.
+            ENDWHILE.
+            lv_len = lv_pos_end - lv_pos_start.
+            IF lv_len > 0.
+              lv_tcxml_str = lv_xml_str+lv_pos_start(lv_len).
+              IF lv_tcxml_str IS NOT INITIAL.
+                gs_out-tipocambioxml = lv_tcxml_str.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      " Fecha/hora timbrado como complemento desde LOG TI (si existe)
+      READ TABLE lt_ti_idx INTO ls_ti_idx
+           WITH TABLE KEY belnr = ls_vbrk-vbeln bukrs = ls_vbrk-bukrs gjahr = lv_gjahr.
+      IF sy-subrc = 0.
+        gs_out-timb_on = ls_ti_idx-created_on.
+        gs_out-timb_at = ls_ti_idx-created_at.
+      ENDIF.
+
+      CLEAR: gs_out-req_icon, gs_out-error_tim_icon, gs_out-fact_ico.
+
+    ELSE.
+      " ===== B) No hay HEAD → no timbrada; evaluar LOGs =====
+      lv_has_er = abap_false.
+      lv_has_rq = abap_false.
+
+      READ TABLE lt_er_keys WITH TABLE KEY
+           belnr = ls_vbrk-vbeln bukrs = ls_vbrk-bukrs gjahr = lv_gjahr
+           TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0. lv_has_er = abap_true. ENDIF.
+
+      READ TABLE lt_rq_keys WITH TABLE KEY
+           belnr = ls_vbrk-vbeln bukrs = ls_vbrk-bukrs gjahr = lv_gjahr
+           TRANSPORTING NO FIELDS.
+      IF sy-subrc = 0. lv_has_rq = abap_true. ENDIF.
+
+      IF lv_has_rq = abap_true. gs_out-req_icon        = icon_led_green. ENDIF.
+      IF lv_has_er = abap_true. gs_out-error_tim_icon = icon_led_red.   ENDIF.
+
+      gs_out-fact_ico = icon_execute_object. " Ejecutar siempre en no timbradas
+
+      IF lv_has_er = abap_true.
+        gs_out-estado      = 'Error'.
+        gs_out-status_icon = icon_led_red.
+      ELSEIF lv_has_rq = abap_true.
+        gs_out-estado      = 'Éxito (RQ)'.
+        gs_out-status_icon = icon_led_green.
+      ELSE.
+        READ TABLE lt_last_h INTO ls_log
+             WITH KEY belnr = ls_vbrk-vbeln bukrs = ls_vbrk-bukrs gjahr = lv_gjahr.
+        IF sy-subrc = 0.
+          gs_out-last_tdoc = ls_log-tipo_doc.
+          gs_out-last_on   = ls_log-created_on.
+          gs_out-last_at   = ls_log-created_at.
+          gs_out-estado      = 'En proceso'.
+          gs_out-status_icon = icon_led_yellow.
+        ELSE.
+          gs_out-estado      = 'Sin solicitud'.
+          gs_out-status_icon = icon_led_yellow.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    APPEND gs_out TO gt_out.
+  ENDLOOP.
+
+  gt_out_all[] = gt_out[].
+
+  "--------------- 7) (Opcional) Filtro por moneda salida ------------
+  " Ya no es necesario porque el SELECT ya filtró con lr_mon.
+
+  "--------------- 8) Filtro por checks de selección -----------------
+  PERFORM filter_by_date.
+  PERFORM filter_by_date.
+  PERFORM filter_by_state.
+
+ENDFORM.
+
+
+
+
+*---------------------------------------------------------------------*
+* Timbrado (PAC) con resultado: 'T' timbrado, 'E' error, 'N' sin cambios
+*---------------------------------------------------------------------*
+FORM pacsovos_fac  USING    p_factura TYPE vbrk-vbeln
+                            p_bukrs   TYPE bukrs
+                            p_gjahr   TYPE gjahr
+                   CHANGING pv_result TYPE c.
+
+  "--------------------- Declaraciones -------------------------------
+  DATA lv_gjahr             TYPE gjahr.
+  DATA lv_fkdat             TYPE vbrk-fkdat.
+  DATA lv_docdate           TYPE sy-datum.
+
+  DATA lv_uuid              TYPE zuuid.
+  DATA lv_url               TYPE zqr40.
+  DATA lv_xml_req           TYPE string.
+  DATA lv_xml_timb          TYPE string.
+  DATA lv_err_xml           TYPE string.
+  DATA lv_err_msg           TYPE string.
+  DATA lv_err_code          TYPE string.
+
+  DATA lv_xstr              TYPE xstring.
+  DATA lv_uuid_existente    TYPE zuuid.
+
+  DATA gv_first_sales_order TYPE vbeln_va.
+
+  DATA lt_head_cfdi         TYPE tt_head_cfdi.
+  DATA lt_det_cfdi          TYPE tt_det_cfdi.
+  DATA ls_head_cfdi         TYPE zcfdi_head_40.
+
+  DATA ls_log               TYPE zcfdi_xml_log.
+  DATA ls_log_er            TYPE zcfdi_xml_log.
+  DATA ls_log_ti            TYPE zcfdi_xml_log.
+
+  DATA lo_cfdi              TYPE REF TO zcl_cfdi40_nast.
+
+  pv_result = 'N'.
+
+  "--------------------- Año ejercicio / fecha doc -------------------
+  CLEAR lv_fkdat.
+  PERFORM prepare_fech_db.
+  SELECT SINGLE fkdat INTO lv_fkdat FROM vbrk WHERE vbeln = p_factura.
+  IF sy-subrc = 0 AND lv_fkdat IS NOT INITIAL.
+    lv_gjahr = lv_fkdat(4).
+  ELSEIF p_gjahr IS NOT INITIAL.
+    lv_gjahr = p_gjahr.
+  ELSE.
+    lv_gjahr = sy-datum(4).
+  ENDIF.
+
+  lv_docdate = lv_fkdat.
+  IF lv_docdate IS INITIAL.
+    lv_docdate = sy-datum.
+  ENDIF.
+
+  "--------------------- Construir HEAD/DET --------------------------
+  REFRESH lt_head_cfdi.
+  REFRESH lt_det_cfdi.
+  PERFORM getfactura USING p_factura lv_docdate
+                     CHANGING lt_head_cfdi lt_det_cfdi.
+
+  READ TABLE lt_head_cfdi INTO ls_head_cfdi INDEX 1.
+  IF sy-subrc <> 0.
+    MESSAGE 'No se pudo construir HEAD/DET para timbrado.' TYPE 'S' DISPLAY LIKE 'E'.
+    pv_result = 'E'.
+    RETURN.
+  ENDIF.
+
+  " Documento de ventas relacionado (si lo requieres)
+  PERFORM llena_tabla_pricipal_fm USING p_factura CHANGING gv_first_sales_order.
+
+  "--------------------- Ya timbrada? -------------------------------
+  CLEAR lv_uuid_existente.
+  SELECT SINGLE uuid INTO lv_uuid_existente
+    FROM zcfdi_head_40
+    WHERE belnr = ls_head_cfdi-belnr
+      AND bukrs = ls_head_cfdi-bukrs
+      AND gjahr = ls_head_cfdi-gjahr
+      AND status = 'T'.
+  IF sy-subrc = 0 AND lv_uuid_existente IS NOT INITIAL.
+    MESSAGE 'La factura ya está timbrada.' TYPE 'S'.
+    pv_result = 'N'.
+    RETURN.
+  ENDIF.
+
+  "--------------------- Armar XML de solicitud (RQ) -----------------
+  CREATE OBJECT lo_cfdi.
+  lo_cfdi->set_data(
+    EXPORTING
+      t_head_cfdi = lt_head_cfdi
+      t_det_cfdi  = lt_det_cfdi ).
+
+  CLEAR lv_xml_req.
+  lv_xml_req = lo_cfdi->build_xml( EXPORTING is_head = ls_head_cfdi ).
+  lo_cfdi->sanitizar_xml_final( CHANGING ct_xml = lv_xml_req ).
+
+  " Guardar RQ en LOG (xstring)
+  CLEAR lv_xstr.
+  PERFORM to_xstr_utf8_safe USING lv_xml_req CHANGING lv_xstr.
+
+  CLEAR ls_log.
+  ls_log-bukrs      = ls_head_cfdi-bukrs.
+  ls_log-belnr      = ls_head_cfdi-belnr.
+  ls_log-gjahr      = ls_head_cfdi-gjahr.
+  ls_log-tipo_doc   = 'RQ'.
+  ls_log-created_on = sy-datum.
+  ls_log-created_at = sy-uzeit.
+  ls_log-xml_req    = lv_xstr.
+  INSERT zcfdi_xml_log FROM ls_log.
+  IF sy-subrc <> 0.
+    MODIFY zcfdi_xml_log FROM ls_log.
+  ENDIF.
+
+  "--------------------- Llamada al PAC ------------------------------
+  CLEAR: lv_uuid, lv_url, lv_xml_timb, lv_err_xml, lv_err_msg, lv_err_code.
+  TRY.
+      lo_cfdi->call_timbrado(
+        EXPORTING
+          i_xml      = lv_xml_req
+        IMPORTING
+          e_uuid     = lv_uuid
+          e_url      = lv_url
+          e_xml_timb = lv_xml_timb
+          e_err_xml  = lv_err_xml
+          e_err_msg  = lv_err_msg
+          e_err_code = lv_err_code ).
+    CATCH cx_root INTO DATA(lx_call).
+      lv_err_msg  = lx_call->get_text( ).
+      CLEAR lv_uuid.
+  ENDTRY.
+
+  "--------------------- Resultado del PAC ---------------------------
+  IF lv_uuid IS INITIAL.
+    " ==== ERROR ====
+    PERFORM popup_error_timbrado_plus
+      USING p_factura lv_err_code lv_err_msg lv_err_xml.
+
+    " Registrar ER en LOG
+    DATA(lv_payload_err) = lv_err_msg.
+    IF lv_err_xml IS NOT INITIAL.
+      lv_payload_err = lv_err_xml.
+    ENDIF.
+
+    CLEAR lv_xstr.
+    IF lv_payload_err IS NOT INITIAL.
+      PERFORM to_xstr_utf8_safe USING lv_payload_err CHANGING lv_xstr.
+    ENDIF.
+
+    CLEAR ls_log_er.
+    ls_log_er-bukrs      = ls_head_cfdi-bukrs.
+    ls_log_er-belnr      = ls_head_cfdi-belnr.
+    ls_log_er-gjahr      = ls_head_cfdi-gjahr.
+    ls_log_er-tipo_doc   = 'ER'.
+    ls_log_er-created_on = sy-datum.
+    ls_log_er-created_at = sy-uzeit.
+    ls_log_er-xml_req    = lv_xstr.
+    INSERT zcfdi_xml_log FROM ls_log_er.
+    IF sy-subrc <> 0.
+      MODIFY zcfdi_xml_log FROM ls_log_er.
+    ENDIF.
+
+    pv_result = 'E'.
+    RETURN.
+  ENDIF.
+
+  " ==== ÉXITO ====
+  " Persistir en tablas Z (HEAD/DET/UUID/URL/XML_TIMBRADO)
+  TRY.
+      lo_cfdi->persist_zcfdi_tables(
+        iv_uuid         = lv_uuid
+        iv_url          = lv_url
+        iv_xml_timb_str = lv_xml_timb ).
+    CATCH cx_root INTO DATA(lx_pers).
+      " Si fallara persistencia, lo tratamos como error lógico
+      lv_err_msg = lx_pers->get_text( ).
+      PERFORM popup_error_timbrado_plus
+        USING p_factura 'PERSIST' lv_err_msg ''.
+      pv_result = 'E'.
+      RETURN.
+  ENDTRY.
+
+  " Registrar TI en LOG con XML timbrado
+  CLEAR lv_xstr.
+  IF lv_xml_timb IS NOT INITIAL.
+    PERFORM to_xstr_utf8_safe USING lv_xml_timb CHANGING lv_xstr.
+  ENDIF.
+
+  CLEAR ls_log_ti.
+  ls_log_ti-bukrs      = ls_head_cfdi-bukrs.
+  ls_log_ti-belnr      = ls_head_cfdi-belnr.
+  ls_log_ti-gjahr      = ls_head_cfdi-gjahr.
+  ls_log_ti-tipo_doc   = 'TI'.
+  ls_log_ti-created_on = sy-datum.
+  ls_log_ti-created_at = sy-uzeit.
+  ls_log_ti-xml_req    = lv_xstr.
+  INSERT zcfdi_xml_log FROM ls_log_ti.
+  IF sy-subrc <> 0.
+    MODIFY zcfdi_xml_log FROM ls_log_ti.
+  ENDIF.
+
+  COMMIT WORK AND WAIT.
+
+  pv_result = 'T'.
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* Obtener HEAD/DET de factura
+*---------------------------------------------------------------------*
+FORM getfactura USING
+    pvbeln     TYPE vbrk-vbeln
+    pfechadoc  TYPE sy-datum
+   CHANGING
+    ct_head_cfdi TYPE tt_head_cfdi
+    ct_det_cfdi  TYPE tt_det_cfdi.
+
+  CONSTANTS: c_mxn TYPE waers VALUE 'MXN'.
+
+  DATA:
+    ls_vbrk              TYPE vbrk,
+    ls_vbco3             TYPE vbco3,
+    gs_header_printvw    TYPE vbdkr,
+    gt_positions_printvw TYPE tbl_vbdpr,
+    lt_komv              TYPE komv_tab,
+    lt_vbpa              TYPE vbpa_tab,
+    lt_header            TYPE vbrk_tab,
+    gs_header            TYPE vbrkvb,
+    wa_t001              TYPE t001,
+    wa_adrc              TYPE adrc,
+    lv_gjahr             TYPE gjahr,
+    lv_rate              TYPE bapi1093_0,
+    wa_head_cfdi         TYPE zcfdi_head_40,
+    wa_det_cfdi          TYPE zcfdi_det_40,
+    lv_rfc_cli           TYPE stcd1,
+    lv_rfc_emisor        TYPE paval.
+
+  ls_vbco3-spras = sy-langu.
+  ls_vbco3-vbeln = pvbeln.
+  REFRESH gt_positions_printvw.
+  CALL FUNCTION 'RV_BILLING_PRINT_VIEW'
+    EXPORTING
+      comwa = ls_vbco3
+    IMPORTING
+      kopf  = gs_header_printvw
+    TABLES
+      pos   = gt_positions_printvw.
+
+  ls_vbrk-vbeln = pvbeln.
+  REFRESH: lt_komv, lt_vbpa, lt_header, gt_positions.
+  CALL FUNCTION 'RV_INVOICE_DOCUMENT_READ'
+    EXPORTING
+      konv_read = abap_true
+      vbrk_i    = ls_vbrk
+      no_nast   = space
+    TABLES
+      xkomv     = lt_komv
+      xvbpa     = lt_vbpa
+      xvbrk     = lt_header
+      xvbrp     = gt_positions.
+
+  SORT lt_header BY vbeln.
+  READ TABLE lt_header INTO gs_header WITH KEY vbeln = pvbeln BINARY SEARCH.
+  IF sy-subrc <> 0. RETURN. ENDIF.
+
+  SELECT SINGLE * INTO wa_t001 FROM t001 WHERE bukrs = gs_header-bukrs.
+  IF sy-subrc = 0 AND wa_t001-adrnr IS NOT INITIAL.
+    SELECT SINGLE * INTO wa_adrc FROM adrc WHERE addrnumber = wa_t001-adrnr.
+  ENDIF.
+
+  SELECT SINGLE stcd1 INTO lv_rfc_cli FROM kna1 WHERE kunnr = gs_header-kunag.
+  SELECT SINGLE paval INTO lv_rfc_emisor FROM t001z
+   WHERE bukrs = gs_header-bukrs AND party = 'MX_RFC'.
+
+  IF gs_header-waerk = c_mxn.
+    wa_head_cfdi-tipo_cambio = 1.
+  ELSE.
+    CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+      EXPORTING
+        rate_type  = 'M'
+        from_curr  = gs_header-waerk
+        to_currncy = c_mxn
+        date       = pfechadoc
+      IMPORTING
+        exch_rate  = lv_rate.
+    wa_head_cfdi-tipo_cambio = COND decfloat34( WHEN lv_rate-exch_rate IS INITIAL THEN 1 ELSE lv_rate-exch_rate ).
+  ENDIF.
+
+  lv_gjahr                      = gs_header-fkdat(4).
+  CLEAR wa_head_cfdi.
+  wa_head_cfdi-tipo_comp       = 'I'.
+  wa_head_cfdi-bukrs           = gs_header-bukrs.
+  wa_head_cfdi-belnr           = gs_header-vbeln.
+  wa_head_cfdi-bldat           = gs_header-fkdat.
+  wa_head_cfdi-gjahr           = lv_gjahr.
+  wa_head_cfdi-tipo_doc        = 'FF'.
+  wa_head_cfdi-uzeit           = sy-uzeit.
+  wa_head_cfdi-lugar_exp       = wa_adrc-post_code1.
+  wa_head_cfdi-total           = gs_header-netwr + gs_header-mwsbk.
+  wa_head_cfdi-waers           = gs_header-waerk.
+  wa_head_cfdi-total_iva       = gs_header-mwsbk.
+  wa_head_cfdi-subtotal        = gs_header-netwr.
+  wa_head_cfdi-version         = '4.0'.
+  wa_head_cfdi-regimen_fiscal  = '601'.
+  wa_head_cfdi-kunnr           = gs_header-kunag.
+  wa_head_cfdi-nombre_emisor   = wa_t001-butxt.
+  wa_head_cfdi-rfc_emisor      = lv_rfc_emisor.
+  wa_head_cfdi-rfc_receptor    = lv_rfc_cli.
+  wa_head_cfdi-factura         = gs_header-vbeln.
+  wa_head_cfdi-vkorg           = gs_header-vkorg.
+  wa_head_cfdi-vtweg           = gs_header-vtweg.
+  wa_head_cfdi-spart           = gs_header-spart.
+  APPEND wa_head_cfdi TO ct_head_cfdi.
+
+  SORT lt_komv      BY knumv kposn kschl.
+  SORT gt_positions BY vbeln posnr.
+
+  LOOP AT gt_positions ASSIGNING FIELD-SYMBOL(<ls_pos>) WHERE vbeln = pvbeln.
+    CLEAR wa_det_cfdi.
+    wa_det_cfdi-bukrs    = gs_header-bukrs.
+    wa_det_cfdi-belnr    = <ls_pos>-vbeln.
+    wa_det_cfdi-gjahr    = lv_gjahr.
+    wa_det_cfdi-cantidad = <ls_pos>-fkimg.
+    wa_det_cfdi-prod_eka = <ls_pos>-matnr.
+    IF <ls_pos>-fkimg > 0. wa_det_cfdi-valor_unit = <ls_pos>-netwr / <ls_pos>-fkimg. ENDIF.
+*    wa_det_cfdi- = <ls_pos>-netwr.
+
+    READ TABLE lt_komv ASSIGNING FIELD-SYMBOL(<ls_mwst>)
+         WITH KEY knumv = gs_header-knumv kposn = <ls_pos>-posnr kschl = 'MWST'
+         BINARY SEARCH.
+    IF sy-subrc = 0 AND <ls_mwst>-kbetr IS NOT INITIAL.
+      wa_det_cfdi-importe_iva = <ls_pos>-netwr * ( <ls_mwst>-kbetr / 1000 ).
+    ELSE.
+      wa_det_cfdi-importe_iva = <ls_pos>-netwr * '0.16'.
+    ENDIF.
+
+    APPEND wa_det_cfdi TO ct_det_cfdi.
+  ENDLOOP.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Conversión segura a XSTRING
+*---------------------------------------------------------------------*
+FORM to_xstr_utf8_safe USING    iv_text TYPE string
+                       CHANGING ev_xstr TYPE xstring.
+  DATA lo_out TYPE REF TO cl_abap_conv_out_ce.
+  CLEAR ev_xstr.
+  TRY.
+      lo_out = cl_abap_conv_out_ce=>create(
+                 encoding    = 'UTF-8'
+                 replacement = '?'
+                 ignore_cerr = abap_true ).
+      lo_out->write( data = iv_text ).
+      ev_xstr = lo_out->get_buffer( ).
+      IF xstrlen( ev_xstr ) > 20000000.
+        MESSAGE 'XML a guardar en LOG es demasiado grande.' TYPE 'E'.
+        CLEAR ev_xstr.
+      ENDIF.
+    CATCH cx_root INTO DATA(lx).
+      CLEAR ev_xstr.
+      MESSAGE lx->get_text( ) TYPE 'E'.
+  ENDTRY.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Popup ALV simple (legacy)
+*---------------------------------------------------------------------*
+FORM popup_error_timbrado
+  USING    pv_vbeln     TYPE vbrk-vbeln
+           iv_err_code  TYPE string
+           iv_err_msg   TYPE string
+           iv_err_xml   TYPE string.
+
+  TYPES: BEGIN OF ty_errrow,
+           campo TYPE char30,
+           valor TYPE string,
+         END OF ty_errrow.
+
+  DATA: lt_rows   TYPE STANDARD TABLE OF ty_errrow,
+        ls_row    TYPE ty_errrow,
+        lt_fcat   TYPE slis_t_fieldcat_alv,
+        ls_fcat   TYPE slis_fieldcat_alv,
+        ls_self   TYPE slis_selfield,
+        lv_answer TYPE c,
+        lv_title  TYPE lvc_title.
+
+  CLEAR lt_rows.
+  ls_row-campo = 'Factura'. ls_row-valor = pv_vbeln.   APPEND ls_row TO lt_rows.
+  ls_row-campo = 'Código'.  ls_row-valor = iv_err_code.APPEND ls_row TO lt_rows.
+  ls_row-campo = 'Mensaje'. ls_row-valor = iv_err_msg. APPEND ls_row TO lt_rows.
+
+  REFRESH lt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'CAMPO'. ls_fcat-seltext_l = 'Campo'. ls_fcat-outputlen = 30.  APPEND ls_fcat TO lt_fcat.
+  CLEAR ls_fcat. ls_fcat-fieldname = 'VALOR'. ls_fcat-seltext_l = 'Valor'. ls_fcat-outputlen = 120. APPEND ls_fcat TO lt_fcat.
+
+  lv_title = |Error de timbrado (PAC)|.
+
+  CALL FUNCTION 'REUSE_ALV_POPUP_TO_SELECT'
+    EXPORTING
+      i_title               = lv_title
+      i_selection           = space
+      i_zebra               = 'X'
+      i_screen_start_column = 10
+      i_screen_start_line   = 3
+      i_screen_end_column   = 120
+      i_screen_end_line     = 18
+      it_fieldcat           = lt_fcat
+      i_callback_program    = sy-repid
+      i_tabname             = 'LT_ROWS'
+    IMPORTING
+      es_selfield           = ls_self
+    TABLES
+      t_outtab              = lt_rows.
+
+  IF iv_err_xml IS NOT INITIAL AND sy-batch IS INITIAL.
+    CALL FUNCTION 'POPUP_TO_CONFIRM'
+      EXPORTING
+        titlebar       = 'XML de error'
+        text_question  = '¿Deseas guardar y abrir el XML de error?'
+        text_button_1  = 'Sí'(001)
+        text_button_2  = 'No'(002)
+        default_button = '1'
+      IMPORTING
+        answer         = lv_answer.
+    IF lv_answer = '1'.
+      DATA lv_defname TYPE string.
+      CONCATENATE 'CFDI_Error_Timbrado_' pv_vbeln '.xml' INTO lv_defname.
+      PERFORM save_and_open_xml USING iv_err_xml lv_defname.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Guardar/abrir XML desde STRING
+*---------------------------------------------------------------------*
+FORM save_and_open_xml
+  USING iv_xml         TYPE string
+        iv_defaultname TYPE string.
+
+  DATA: lv_xstr     TYPE xstring,
+        lt_bin      TYPE solix_tab,
+        lv_fullpath TYPE string,
+        lv_filename TYPE string,
+        lv_path     TYPE string,
+        lv_action   TYPE i.
+
+  DATA(lo_out) = cl_abap_conv_out_ce=>create(
+                   encoding    = 'UTF-8'
+                   replacement = '?'
+                   ignore_cerr = abap_true ).
+  lo_out->write( data = iv_xml ).
+  lv_xstr = lo_out->get_buffer( ).
+
+  cl_gui_frontend_services=>file_save_dialog(
+    EXPORTING default_extension = 'xml'
+              default_file_name = iv_defaultname
+    CHANGING  filename    = lv_filename
+              path        = lv_path
+              fullpath    = lv_fullpath
+              user_action = lv_action ).
+
+  IF lv_action <> cl_gui_frontend_services=>action_ok OR lv_fullpath IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer     = lv_xstr
+    TABLES
+      binary_tab = lt_bin.
+
+  cl_gui_frontend_services=>gui_download(
+    EXPORTING filename = lv_fullpath filetype = 'BIN'
+    CHANGING  data_tab = lt_bin ).
+
+  IF sy-subrc = 0.
+    cl_gui_frontend_services=>execute(
+      EXPORTING document  = lv_fullpath
+                operation = 'OPEN' ).
+  ELSE.
+    MESSAGE |No se pudo guardar { lv_fullpath }.| TYPE 'E'.
+  ENDIF.
+ENDFORM.
+FORM popup_error_timbrado_plus
+  USING    pv_vbeln     TYPE vbrk-vbeln
+           iv_err_code  TYPE string
+           iv_err_msg   TYPE string
+           iv_err_xml   TYPE string.
+
+  DATA: lo_alv    TYPE REF TO cl_salv_table,
+        lo_cols   TYPE REF TO cl_salv_columns_table,
+        lo_col    TYPE REF TO cl_salv_column_table,
+        lo_funcs  TYPE REF TO cl_salv_functions_list,
+        lo_events TYPE REF TO cl_salv_events_table.
+
+  TYPES: BEGIN OF ty_kv,
+           campo TYPE string,
+           valor TYPE string,
+         END OF ty_kv.
+  DATA: lt_kv TYPE STANDARD TABLE OF ty_kv,
+        ls_kv TYPE ty_kv.
+
+  " ---- Cabecera fija
+  CLEAR ls_kv. ls_kv-campo = 'Factura'. ls_kv-valor = pv_vbeln.    APPEND ls_kv TO lt_kv.
+  CLEAR ls_kv. ls_kv-campo = 'Código'.  ls_kv-valor = iv_err_code. APPEND ls_kv TO lt_kv.
+
+  " ---- Mensaje con wrap manual a 120
+  DATA lv_max        TYPE i VALUE 120.
+  DATA lv_line       TYPE string.
+  DATA lv_text       TYPE string.
+  DATA lv_len        TYPE i.
+  DATA lv_split      TYPE i.
+  DATA lv_off        TYPE i.
+  DATA lv_cut        TYPE i.
+  DATA lv_msg_tagged TYPE abap_bool.
+
+  lv_text = iv_err_msg.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf IN lv_text
+          WITH cl_abap_char_utilities=>newline.
+
+  IF lv_text IS INITIAL.
+    CLEAR ls_kv.
+    ls_kv-campo = 'Mensaje'.
+    ls_kv-valor = '(sin detalle)'.
+    APPEND ls_kv TO lt_kv.
+  ELSE.
+    DATA lt_parrafos TYPE STANDARD TABLE OF string.
+    SPLIT lv_text AT cl_abap_char_utilities=>newline INTO TABLE lt_parrafos.
+
+    LOOP AT lt_parrafos INTO lv_text.
+      SHIFT lv_text LEFT DELETING LEADING space.
+
+      WHILE lv_text IS NOT INITIAL.
+        lv_len = strlen( lv_text ).
+
+        IF lv_len <= lv_max.
+          lv_line = lv_text.
+          CLEAR lv_text.
+        ELSE.
+          " Buscar el último espacio dentro de los primeros 120
+          lv_off = lv_max - 1.
+          WHILE lv_off > 0 AND lv_text+lv_off(1) <> space.
+            lv_off = lv_off - 1.
+          ENDWHILE.
+
+          IF lv_off = 0.
+            " No hay espacio: corte duro en 120
+            lv_split = lv_max.
+            lv_cut   = lv_split.          " no incrementa (no hay espacio)
+          ELSE.
+            " Cortar antes del espacio
+            lv_split = lv_off.
+            lv_cut   = lv_split + 1.      " saltar el espacio
+          ENDIF.
+
+          lv_line = lv_text(lv_split).
+          SHIFT lv_text LEFT BY lv_cut PLACES.
+          SHIFT lv_text LEFT DELETING LEADING space.
+        ENDIF.
+
+        CLEAR ls_kv.
+        IF lv_msg_tagged IS INITIAL.
+          ls_kv-campo = 'Mensaje'.
+          lv_msg_tagged = abap_true.
+        ELSE.
+          ls_kv-campo = ''.
+        ENDIF.
+        ls_kv-valor = lv_line.
+        APPEND ls_kv TO lt_kv.
+      ENDWHILE.
+    ENDLOOP.
+  ENDIF.
+
+  " ---- SALV popup (LIST)
+  cl_salv_table=>factory(
+    IMPORTING r_salv_table = lo_alv
+    CHANGING  t_table      = lt_kv ).
+
+  lo_alv->set_screen_popup(
+    start_column = 5  start_line = 2
+    end_column   = 130 end_line  = 25 ).
+
+  lo_alv->get_display_settings( )->set_list_header( 'Error de timbrado (PAC)' ).
+  lo_alv->get_display_settings( )->set_striped_pattern( abap_true ).
+
+  lo_cols = lo_alv->get_columns( ).
+  lo_cols->set_optimize( abap_true ).
+  lo_col ?= lo_cols->get_column( 'CAMPO' ). lo_col->set_short_text( 'Campo' ).
+  lo_col ?= lo_cols->get_column( 'VALOR' ). lo_col->set_short_text( 'Valor' ).
+
+  " ---- Funciones: sólo personalizadas en LIST (evitar ENABLE_FUNCTION estándar)
+  lo_funcs = lo_alv->get_functions( ).
+  " No usar: lo_funcs->set_all( abap_true ).
+
+  TRY.
+      lo_funcs->add_function(
+        name     = 'Z_CPYMSG'                     " <— código propio
+        text     = 'Copiar mensaje'
+        tooltip  = 'Copiar mensaje al portapapeles'
+        position = if_salv_c_function_position=>right_of_salv_functions ).
+
+      IF iv_err_xml IS NOT INITIAL.
+        lo_funcs->add_function(
+          name     = 'Z_XML'                      " <— código propio
+          text     = 'Guardar/Abrir XML'
+          tooltip  = 'Guardar y abrir el XML de error'
+          position = if_salv_c_function_position=>right_of_salv_functions ).
+      ENDIF.
+    CATCH cx_salv_method_not_supported.
+      " En releases muy antiguos podría no permitir add_function en LIST: ignorar
+  ENDTRY.
+
+  " ---- Eventos
+  lo_events = lo_alv->get_event( ).
+  DATA(lo_h) = NEW lcl_pacerr_handler( ).
+  lo_h->vbeln = pv_vbeln.
+  lo_h->msg   = iv_err_msg.
+  lo_h->xml   = iv_err_xml.
+  SET HANDLER lo_h->on_added_function FOR lo_events.
+
+  lo_alv->display( ).
+
+ENDFORM.
+*---------------------------------------------------------------------*
+* 1er documento de ventas relacionado
+*---------------------------------------------------------------------*
+FORM llena_tabla_pricipal_fm
+  USING    pv_vbeln_vf            TYPE vbrk-vbeln
+  CHANGING gv_first_sales_order   TYPE vbeln_va.
+
+  DATA: lt_so_keys TYPE SORTED TABLE OF vbeln_va WITH UNIQUE KEY table_line.
+
+  CLEAR gv_first_sales_order.
+
+  SELECT aubel
+    FROM vbrp
+    INTO TABLE @DATA(lt_aubel)
+    WHERE vbeln = @pv_vbeln_vf
+      AND aubel IS NOT NULL.
+  IF sy-subrc = 0.
+    SORT lt_aubel BY aubel.
+    DELETE ADJACENT DUPLICATES FROM lt_aubel COMPARING aubel.
+    LOOP AT lt_aubel ASSIGNING FIELD-SYMBOL(<ls_aubel>).
+      INSERT <ls_aubel>-aubel INTO TABLE lt_so_keys.
+    ENDLOOP.
+  ENDIF.
+
+  IF lt_so_keys IS NOT INITIAL.
+    READ TABLE lt_so_keys INDEX 1 INTO gv_first_sales_order.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Reaplicar filtro actual (toolbar)
+*---------------------------------------------------------------------*
+FORM apply_current_filter.
+  CASE gv_last_filter.
+    WHEN 'GRN'.
+      REFRESH gt_out.
+      LOOP AT gt_out_all INTO gs_out
+        WHERE estado = 'Timbrada'
+           OR estado = 'Éxito (RQ)'.
+        APPEND gs_out TO gt_out.
+      ENDLOOP.
+
+    WHEN 'YEL'.
+      REFRESH gt_out.
+      LOOP AT gt_out_all INTO gs_out
+        WHERE estado = 'En proceso'
+           OR estado = 'Sin solicitud'.
+        APPEND gs_out TO gt_out.
+      ENDLOOP.
+
+    WHEN 'RED'.
+      REFRESH gt_out.
+      LOOP AT gt_out_all INTO gs_out
+        WHERE estado = 'Error'
+           OR has_error = 'X'.
+        APPEND gs_out TO gt_out.
+      ENDLOOP.
+
+    WHEN OTHERS.
+      gt_out[] = gt_out_all[].
+  ENDCASE.
+ENDFORM.
+FORM filter_by_state.
+
+  DATA lt_filtered TYPE STANDARD TABLE OF ty_out.
+  DATA lv_any      TYPE abap_bool.
+
+  lv_any = abap_false.
+  IF p_timb = abap_true OR p_err = abap_true OR p_sin = abap_true.
+    lv_any = abap_true.
+  ENDIF.
+
+  IF lv_any = abap_false.
+    " Ningún check marcado: no filtramos (dejamos todo como está)
+    RETURN.
+  ENDIF.
+
+  REFRESH lt_filtered.
+  LOOP AT gt_out INTO gs_out.
+    DATA(lv_keep) = abap_false.
+
+    IF p_timb = abap_true AND gs_out-estado = 'Timbrada'.
+      lv_keep = abap_true.
+    ENDIF.
+
+    IF p_err = abap_true AND gs_out-estado = 'Error'.
+      lv_keep = abap_true.
+    ENDIF.
+
+    IF p_sin = abap_true AND gs_out-estado = 'Sin solicitud'.
+      lv_keep = abap_true.
+    ENDIF.
+
+    IF lv_keep = abap_true.
+      APPEND gs_out TO lt_filtered.
+    ENDIF.
+  ENDLOOP.
+
+  gt_out = lt_filtered.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+* Guardar filtros/orden del ALV (frontend) antes de refrescar datos
+*---------------------------------------------------------------------*
+FORM alv_save_state CHANGING ct_filter TYPE lvc_t_filt
+                             ct_sort   TYPE lvc_t_sort.
+
+  DATA lr_grid TYPE REF TO cl_gui_alv_grid.
+
+  CLEAR: ct_filter, ct_sort.
+
+  CALL FUNCTION 'GET_GLOBALS_FROM_SLVC_FULLSCR'
+    IMPORTING
+      e_grid = lr_grid.
+
+  IF lr_grid IS BOUND.
+    lr_grid->get_filter_criteria( IMPORTING et_filter = ct_filter ).
+    lr_grid->get_sort_criteria(   IMPORTING et_sort   = ct_sort   ).
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Restaurar filtros/orden del ALV (frontend) después del refresh
+*---------------------------------------------------------------------*
+FORM alv_restore_state USING it_filter TYPE lvc_t_filt
+                             it_sort   TYPE lvc_t_sort.
+
+  DATA lr_grid TYPE REF TO cl_gui_alv_grid.
+  DATA ls_stbl TYPE lvc_s_stbl.
+
+  CALL FUNCTION 'GET_GLOBALS_FROM_SLVC_FULLSCR'
+    IMPORTING
+      e_grid = lr_grid.
+
+  IF lr_grid IS BOUND.
+    IF it_filter IS NOT INITIAL.
+      lr_grid->set_filter_criteria( it_filter ).
+    ENDIF.
+    IF it_sort IS NOT INITIAL.
+      lr_grid->set_sort_criteria( it_sort ).
+    ENDIF.
+
+    " refresco estable (mantiene posición/columnas)
+    ls_stbl-row = 'X'.
+    ls_stbl-col = 'X'.
+    lr_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
+  ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+* Actualiza SOLO la fila seleccionada cuando el PAC devuelve error
+*---------------------------------------------------------------------*
+FORM mark_row_error USING pv_index TYPE sy-tabix.
+
+  DATA ls_out TYPE ty_out.
+
+  IF pv_index IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  READ TABLE gt_out INDEX pv_index INTO ls_out.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  " Estado e iconos de error
+  ls_out-estado          = 'Error'.
+  ls_out-status_icon     = icon_led_red.
+  ls_out-error_tim_icon  = icon_led_red.
+  ls_out-req_icon        = icon_led_green.  " suele existir RQ tras el intento
+  ls_out-fact_ico        = icon_execute_object. " debe poder reintentar
+
+  " Limpia íconos de timbrado por si acaso
+  CLEAR ls_out-timb_icon.
+
+  MODIFY gt_out INDEX pv_index FROM ls_out.
+
+  " Refresca frontend SIN reconstruir datos → no se pierden filtros/scroll
+  " (solo re-dibuja el grid con gt_out en memoria)
+  " Nota: rs_self-refresh = 'X' ya lo pones en USER_COMMAND si quieres.
+ENDFORM.
+*---------------------------------------------------------------------*
+* Filtro por fechas según p_ftim: documento (FKDAT) o timbrado (TIMB_ON)
+*---------------------------------------------------------------------*
+FORM filter_by_date.
+  IF s_fech[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  DATA lt_keep TYPE STANDARD TABLE OF ty_out WITH EMPTY KEY.
+  FIELD-SYMBOLS <ls> TYPE ty_out.
+
+  LOOP AT gt_out ASSIGNING <ls>.
+    DATA(lv_date) = CONV sy-datum( 0 ).
+    IF p_ftim = abap_true.
+      lv_date = <ls>-timb_on.
+    ELSE.
+      lv_date = <ls>-fecha.
+    ENDIF.
+
+    IF lv_date IS NOT INITIAL AND lv_date IN s_fech.
+      APPEND <ls> TO lt_keep.
+    ENDIF.
+  ENDLOOP.
+
+  gt_out = lt_keep.
+  gt_out_all = lt_keep.
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* Construye lr_fech_db a partir de s_fech y p_ftim
+*---------------------------------------------------------------------*
+FORM prepare_fech_db.
+  lr_fech_db[] = s_fech[].
+
+  IF p_ftim = abap_true AND s_fech[] IS NOT INITIAL.
+    REFRESH lr_fech_db.
+    CLEAR ls_rfech.
+    ls_rfech-sign   = 'I'.
+    ls_rfech-option = 'BT'.
+    ls_rfech-low    = '00000000'.
+    ls_rfech-high   = '99991231'.
+    APPEND ls_rfech TO lr_fech_db.
+  ENDIF.
+ENDFORM.
+
+
+
+
+
+
+
+FORM last_index_of USING    p_text   TYPE string
+                            p_needle TYPE string
+                   CHANGING p_idx    TYPE i.
+
+  DATA: lv_off        TYPE i VALUE 0,
+        lv_total_len  TYPE i,
+        lv_needle_len TYPE i,
+        lv_match_off  TYPE i.
+
+  p_idx = -1.
+  lv_total_len  = strlen( p_text ).
+  lv_needle_len = strlen( p_needle ).
+
+  IF lv_total_len = 0 OR lv_needle_len = 0 OR lv_total_len < lv_needle_len.
+    RETURN.
+  ENDIF.
+
+  WHILE lv_off <= lv_total_len - lv_needle_len.
+    FIND p_needle IN p_text+lv_off MATCH OFFSET lv_match_off.
+    IF sy-subrc <> 0.
+      EXIT.
+    ENDIF.
+    p_idx   = lv_off + lv_match_off.     " guardar última coincidencia
+    lv_off  = p_idx + 1.                 " avanzar SIEMPRE una posición
+  ENDWHILE.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*   FORM OPEN_XML_FROM_ERROR  (versión confirmada funcional)
+*---------------------------------------------------------------------*
+*   Lee XML de error del PAC, genera HTML en UTF-8, guarda en C:\Temp
+*   y lo abre automáticamente en el navegador local.
+*---------------------------------------------------------------------*
+FORM open_xml_from_error USING p_belnr TYPE vbrk-vbeln
+                               p_bukrs TYPE bukrs
+                               p_gjahr TYPE gjahr.
+
+  DATA: lv_xstr_in    TYPE xstring,
+        lv_xstr_out   TYPE xstring,
+        lv_txt        TYPE string,
+        lv_html       TYPE string,
+        lv_xstr_html  TYPE xstring,
+        lt_bin_tab    TYPE solix_tab,
+        lv_workdir    TYPE string VALUE 'C:\Temp',
+        lv_file       TYPE string,
+        lv_full       TYPE string,
+        lv_rc         TYPE i,
+        lo_conv_in    TYPE REF TO cl_abap_conv_in_ce.
+
+*---------------------------------------------------------------------*
+* 1) Leer XML tipo ER desde la tabla Z
+*---------------------------------------------------------------------*
+  SELECT SINGLE xml_req
+    INTO lv_xstr_in
+    FROM zcfdi_xml_log
+   WHERE bukrs    = p_bukrs
+     AND belnr    = p_belnr
+     AND gjahr    = p_gjahr
+     AND tipo_doc = 'ER'.
+
+  IF sy-subrc <> 0 OR lv_xstr_in IS INITIAL.
+    MESSAGE 'No se encontró XML tipo ER en ZCFDI_XML_LOG' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 2) Convertir XSTRING → STRING legible (UTF-8 / UTF-16)
+*---------------------------------------------------------------------*
+  TRY.
+      IF lv_xstr_in(2) = cl_abap_char_utilities=>byte_order_mark_big OR
+         lv_xstr_in(2) = cl_abap_char_utilities=>byte_order_mark_little.
+        lo_conv_in = cl_abap_conv_in_ce=>create( encoding = 'UTF-16LE' ).
+      ELSE.
+        lo_conv_in = cl_abap_conv_in_ce=>create( encoding = 'UTF-8' ).
+      ENDIF.
+
+      lo_conv_in->convert(
+        EXPORTING input  = lv_xstr_in
+        IMPORTING data   = lv_txt ).
+
+    CATCH cx_root INTO DATA(lx_conv).
+      MESSAGE lx_conv->get_text( ) TYPE 'E'.
+      RETURN.
+  ENDTRY.
+
+  IF lv_txt IS INITIAL.
+    MESSAGE 'El XML de error está vacío o no se pudo convertir.' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 3) Limpieza mínima / normalización
+*---------------------------------------------------------------------*
+  IF lv_txt CS '<InnerErrors>' OR lv_txt CS '<Error>'.
+    PERFORM normalize_innererrors_xml USING lv_txt CHANGING lv_txt lv_xstr_out.
+  ELSE.
+    PERFORM normalize_raw_to_xml USING lv_xstr_in CHANGING lv_txt lv_xstr_out.
+    PERFORM sanitizar_xml_final   CHANGING lv_txt.
+    PERFORM clean_valid_xml_range CHANGING lv_txt.
+  ENDIF.
+
+  IF lv_txt(1) <> '<'.
+    FIND FIRST OCCURRENCE OF '<' IN lv_txt MATCH OFFSET DATA(lv_off).
+    IF sy-subrc = 0 AND lv_off GT 0.
+      lv_txt = lv_txt+lv_off.
+    ENDIF.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 4) Crear HTML con meta UTF-8
+*---------------------------------------------------------------------*
+  CONCATENATE
+    '<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"></head>'
+    '<body><pre>'
+    lv_txt
+    '</pre></body></html>'
+  INTO lv_html.
+
+*---------------------------------------------------------------------*
+* 5) Crear carpeta C:\Temp y guardar HTML en UTF-8 binario
+*---------------------------------------------------------------------*
+  CALL METHOD cl_gui_frontend_services=>directory_create
+    EXPORTING
+      directory = lv_workdir
+    CHANGING
+      rc        = lv_rc
+    EXCEPTIONS
+      directory_create_failed  = 1
+      cntl_error               = 2
+      error_no_gui             = 3
+      directory_access_denied  = 4
+      directory_already_exists = 5
+      path_not_found           = 6
+      unknown_error            = 7
+      not_supported_by_gui     = 8
+      wrong_parameter          = 9
+      others                   = 10.
+
+  IF sy-subrc <> 0 AND sy-subrc <> 5.
+    MESSAGE |Error al crear directorio C:\\Temp (código { sy-subrc })| TYPE 'I'.
+  ENDIF.
+
+  CONCATENATE 'CFDI_Error_Timbrado_' p_belnr '.html' INTO lv_file.
+  CONCATENATE lv_workdir '\' lv_file INTO lv_full.
+
+  " --- Conversión a UTF-8 binario real ---
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING
+      text     = lv_html
+      mimetype = 'text/html; charset=UTF-8'
+    IMPORTING
+      buffer   = lv_xstr_html.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer = lv_xstr_html
+    TABLES
+      binary_tab = lt_bin_tab.
+
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename = lv_full
+      filetype = 'BIN'
+    CHANGING
+      data_tab = lt_bin_tab
+    EXCEPTIONS
+      file_write_error        = 1
+      invalid_type            = 2
+      no_batch                = 3
+      gui_refuse_filetransfer = 4
+      others                  = 5.
+
+  IF sy-subrc <> 0.
+    MESSAGE |No se pudo crear el archivo local { lv_full }| TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 6) Abrir automáticamente el archivo .html en el explorador
+*---------------------------------------------------------------------*
+  CALL METHOD cl_gui_frontend_services=>execute
+    EXPORTING
+      document  = lv_full
+      operation = 'OPEN'
+    EXCEPTIONS
+      file_not_found = 1
+      others         = 2.
+
+  IF sy-subrc = 0.
+    MESSAGE |Archivo abierto correctamente: { lv_full }| TYPE 'S'.
+  ELSE.
+    MESSAGE |No se pudo abrir el archivo local { lv_full }| TYPE 'I'.
+  ENDIF.
+
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+*   FORM NORMALIZE_INNERERRORS_XML (compatible con SAP NW 7.0x)
+*---------------------------------------------------------------------*
+FORM normalize_innererrors_xml USING    p_xml_txt_in   TYPE string
+                               CHANGING p_xml_txt_out  TYPE string
+                                         p_xstr_out    TYPE xstring.
+
+  DATA: lv_start TYPE i,
+        lv_end   TYPE i,
+        lv_len   TYPE i.
+
+  " Copiar texto original
+  p_xml_txt_out = p_xml_txt_in.
+
+  " Buscar apertura del XML válido
+  FIND FIRST OCCURRENCE OF REGEX '<(InnerErrors|Error)' IN p_xml_txt_out MATCH OFFSET lv_start.
+  IF sy-subrc = 0.
+    p_xml_txt_out = p_xml_txt_out+lv_start.
+  ENDIF.
+
+  " Buscar cierre del XML
+  FIND ALL OCCURRENCES OF REGEX '</(InnerErrors|Error)>' IN p_xml_txt_out MATCH OFFSET lv_end.
+  IF sy-subrc = 0.
+    lv_end = lv_end + STRLEN('</InnerErrors>').
+    lv_len = lv_end.
+    p_xml_txt_out = p_xml_txt_out(lv_len).
+  ENDIF.
+
+  " Convertir STRING a XSTRING (UTF-8 del sistema)
+  DATA lo_conv TYPE REF TO cl_abap_conv_out_ce.
+  TRY.
+      lo_conv = cl_abap_conv_out_ce=>create(
+                  encoding    = 'UTF-8'
+                  replacement = '?'
+                  ignore_cerr = abap_true ).
+      lo_conv->write( data = p_xml_txt_out ).
+      p_xstr_out = lo_conv->get_buffer( ).
+    CATCH cx_root INTO DATA(lx_err).
+      MESSAGE lx_err->get_text( ) TYPE 'E'.
+  ENDTRY.
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+*   FORM NORMALIZE_RAW_TO_XML
+*---------------------------------------------------------------------*
+FORM normalize_raw_to_xml USING    p_xstr_in  TYPE xstring
+                          CHANGING p_xml_txt  TYPE string
+                                   p_xstr_out TYPE xstring.
+
+  CALL FUNCTION 'ECATT_CONV_XSTRING_TO_STRING'
+    EXPORTING
+      im_xstring  = p_xstr_in
+      im_encoding = 'UTF-8'
+    IMPORTING
+      ex_string   = p_xml_txt.
+
+  IF p_xml_txt IS INITIAL.
+    CALL FUNCTION 'ECATT_CONV_XSTRING_TO_STRING'
+      EXPORTING
+        im_xstring  = p_xstr_in
+        im_encoding = 'ISO-8859-1'
+      IMPORTING
+        ex_string   = p_xml_txt.
+  ENDIF.
+
+  PERFORM sanitizar_xml_final CHANGING p_xml_txt.
+
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING text = p_xml_txt
+    IMPORTING buffer = p_xstr_out.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*   FORM SANITIZAR_XML_FINAL (versión final sin NULL 0x00)
+*---------------------------------------------------------------------*
+FORM sanitizar_xml_final CHANGING p_xml_txt TYPE string.
+
+  DATA: lv_bom_big    TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>byte_order_mark_big,
+        lv_bom_little TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>byte_order_mark_little,
+        lv_minchar    TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>minchar.
+
+  " Quitar BOM si está al inicio
+  IF p_xml_txt(1) = lv_bom_big OR p_xml_txt(1) = lv_bom_little.
+    p_xml_txt = p_xml_txt+1.
+  ENDIF.
+
+  " Eliminar BOM en cualquier posición
+  REPLACE ALL OCCURRENCES OF lv_bom_big    IN p_xml_txt WITH ''.
+  REPLACE ALL OCCURRENCES OF lv_bom_little IN p_xml_txt WITH ''.
+
+  " Reemplazar tabs, saltos de línea y form feeds por espacios
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>horizontal_tab IN p_xml_txt WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline        IN p_xml_txt WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf          IN p_xml_txt WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>form_feed      IN p_xml_txt WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>vertical_tab   IN p_xml_txt WITH space.
+
+  " Eliminar caracteres NULL (0x00) o equivalentes
+  REPLACE ALL OCCURRENCES OF lv_minchar IN p_xml_txt WITH ''.
+  REPLACE ALL OCCURRENCES OF CONV string( '\u0000' ) IN p_xml_txt WITH ''.
+
+  " Quitar cualquier rango de control no imprimible
+  REPLACE ALL OCCURRENCES OF REGEX '[\x00-\x08]'  IN p_xml_txt WITH ''.
+  REPLACE ALL OCCURRENCES OF REGEX '[\x0B-\x0C]'  IN p_xml_txt WITH ''.
+  REPLACE ALL OCCURRENCES OF REGEX '[\x0E-\x1F]'  IN p_xml_txt WITH ''.
+
+  " Quitar espacios en blanco sobrantes
+  SHIFT p_xml_txt LEFT DELETING LEADING space.
+  SHIFT p_xml_txt RIGHT DELETING TRAILING space.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*   FORM CLEAN_VALID_XML_RANGE
+*---------------------------------------------------------------------*
+* Recorta el XML para eliminar contenido extra fuera del documento
+*---------------------------------------------------------------------*
+FORM clean_valid_xml_range CHANGING p_xml TYPE string.
+
+  DATA: lv_start TYPE i,
+        lv_end   TYPE i,
+        lv_len   TYPE i.
+
+  " Buscar inicio del primer tag raíz
+  FIND FIRST OCCURRENCE OF REGEX '<[a-zA-Z0-9:_-]+' IN p_xml MATCH OFFSET lv_start.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  " Buscar el cierre del último tag (</...>)
+  FIND ALL OCCURRENCES OF REGEX '</[a-zA-Z0-9:_-]+>' IN p_xml MATCH OFFSET lv_end.
+  IF sy-subrc = 0.
+    lv_end = lv_end + STRLEN( '</' ).
+  ENDIF.
+
+  " Si hay cierre válido, recortar
+  IF lv_end GT lv_start.
+    lv_len = lv_end - lv_start.
+    p_xml = p_xml+lv_start(lv_len).
+  ENDIF.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+*   FORM OPEN_XML_FROM_LOG
+*---------------------------------------------------------------------*
+*   Lee XML tipo RQ desde la tabla ZCFDI_XML_LOG, lo limpia,
+*   lo guarda como UTF-8 en C:\Temp y lo abre automáticamente.
+*---------------------------------------------------------------------*
+FORM open_xml_from_log USING p_belnr TYPE vbrk-vbeln
+                              p_bukrs TYPE bukrs
+                              p_gjahr TYPE gjahr.
+
+  DATA: lv_xstr_in   TYPE xstring,
+        lv_txt       TYPE string,
+        lv_workdir   TYPE string VALUE 'C:\Temp',
+        lv_file      TYPE string,
+        lv_full      TYPE string,
+        lv_rc        TYPE i,
+        lv_off       TYPE i,
+        lv_first2    TYPE x LENGTH 2,
+        lv_utf16     TYPE abap_bool,
+        lo_conv_in   TYPE REF TO cl_abap_conv_in_ce,
+        lt_xml_tab   TYPE STANDARD TABLE OF string,
+        lv_clean     TYPE string.
+
+*---------------------------------------------------------------------*
+* 1) Leer XML tipo RQ desde la tabla Z
+*---------------------------------------------------------------------*
+  SELECT SINGLE xml_req
+    INTO lv_xstr_in
+    FROM zcfdi_xml_log
+   WHERE bukrs    = p_bukrs
+     AND belnr    = p_belnr
+     AND gjahr    = p_gjahr
+     AND tipo_doc = 'RQ'.
+
+  IF sy-subrc <> 0 OR lv_xstr_in IS INITIAL.
+    MESSAGE 'No se encontró XML tipo RQ en ZCFDI_XML_LOG' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 2) Detectar codificación (UTF-8 / UTF-16)
+*---------------------------------------------------------------------*
+  lv_first2 = lv_xstr_in(2).
+  IF lv_first2 = 'FFFE' OR lv_first2 = 'FEFF'.
+    lv_utf16 = abap_true.
+  ELSE.
+    lv_utf16 = abap_false.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 3) Convertir XSTRING → STRING legible
+*---------------------------------------------------------------------*
+  TRY.
+      IF lv_utf16 = abap_true.
+        lo_conv_in = cl_abap_conv_in_ce=>create( encoding = 'UTF-16LE' ).
+      ELSE.
+        lo_conv_in = cl_abap_conv_in_ce=>create( encoding = 'UTF-8' ).
+      ENDIF.
+
+      lo_conv_in->convert(
+        EXPORTING input  = lv_xstr_in
+        IMPORTING data   = lv_txt ).
+
+    CATCH cx_root INTO DATA(lx_conv).
+      MESSAGE lx_conv->get_text( ) TYPE 'E'.
+      RETURN.
+  ENDTRY.
+
+  IF lv_txt IS INITIAL.
+    MESSAGE 'El XML Request está vacío o no se pudo convertir.' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 4) Limpieza profunda de BOM, saltos y espacios invisibles
+*---------------------------------------------------------------------*
+  lv_clean = lv_txt.
+
+  " Eliminar CR/LF y tabs invisibles
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf IN lv_clean WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_clean WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>horizontal_tab IN lv_clean WITH space.
+
+  " Eliminar BOM si existe
+  IF lv_clean(1) = cl_abap_char_utilities=>byte_order_mark_big OR
+     lv_clean(1) = cl_abap_char_utilities=>byte_order_mark_little.
+    lv_clean = lv_clean+1.
+  ENDIF.
+
+  " Quitar todo lo anterior al primer '<'
+  FIND FIRST OCCURRENCE OF '<' IN lv_clean MATCH OFFSET lv_off.
+  IF sy-subrc = 0 AND lv_off GT 0.
+    lv_clean = lv_clean+lv_off.
+  ENDIF.
+
+  " Quitar espacios iniciales y finales
+  SHIFT lv_clean LEFT DELETING LEADING space.
+  SHIFT lv_clean RIGHT DELETING TRAILING space.
+
+  lv_txt = lv_clean.
+
+*---------------------------------------------------------------------*
+* 5) Crear carpeta C:\Temp (misma lógica del HTML)
+*---------------------------------------------------------------------*
+  CALL METHOD cl_gui_frontend_services=>directory_create
+    EXPORTING
+      directory = lv_workdir
+    CHANGING
+      rc        = lv_rc
+    EXCEPTIONS
+      directory_already_exists = 1
+      others                   = 2.
+
+  " Si existe o ya se puede usar, continuar
+  IF sy-subrc <> 0 AND lv_rc NE 0.
+    MESSAGE 'No se pudo crear el directorio C:\Temp (verifique permisos).' TYPE 'I'.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 6) Guardar XML limpio (UTF-8 texto plano)
+*---------------------------------------------------------------------*
+  CONCATENATE 'CFDI_Request_' p_belnr '.xml' INTO lv_file.
+  CONCATENATE lv_workdir '\' lv_file INTO lv_full.
+
+  APPEND lv_txt TO lt_xml_tab.
+
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename = lv_full
+      filetype = 'ASC'
+      codepage = '4110'    " UTF-8
+    CHANGING
+      data_tab = lt_xml_tab
+    EXCEPTIONS
+      OTHERS = 5.
+
+  IF sy-subrc <> 0.
+    MESSAGE |No se pudo crear el archivo XML local { lv_full }| TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 7) Abrir automáticamente el XML en el navegador
+*---------------------------------------------------------------------*
+  CALL METHOD cl_gui_frontend_services=>execute
+    EXPORTING
+      document  = lv_full
+      operation = 'OPEN'
+    EXCEPTIONS
+      file_not_found = 1
+      others         = 2.
+
+  IF sy-subrc = 0.
+    MESSAGE |Archivo XML RQ abierto correctamente: { lv_full }| TYPE 'S'.
+  ELSE.
+    MESSAGE |No se pudo abrir el archivo local { lv_full }| TYPE 'I'.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+*   FORM OPEN_XML_TIMB
+*---------------------------------------------------------------------*
+*   Lee XML tipo TI (timbrado) desde ZCFDI_XML_40_XML o ZCFDI_XML_LOG,
+*   corrige cabecera en memoria, valida, guarda y abre en navegador.
+*---------------------------------------------------------------------*
+FORM open_xml_timb USING p_belnr TYPE vbrk-vbeln
+                         p_bukrs TYPE bukrs
+                         p_gjahr TYPE gjahr.
+
+  DATA: lv_xml_str   TYPE string,      " XML como STRING (tabla nueva)
+        lv_xstr_in   TYPE xstring,     " XML binario (tabla antigua)
+        lv_txt       TYPE string,
+        lv_valido    TYPE abap_bool,
+        lv_msg       TYPE string,
+        lv_workdir   TYPE string VALUE 'C:\Temp',
+        lv_file      TYPE string,
+        lv_full      TYPE string,
+        lv_rc        TYPE i,
+        lv_tabla_fuente TYPE string,
+        lo_conv_in   TYPE REF TO cl_abap_conv_in_ce,
+        lx_conv      TYPE REF TO cx_root,
+        lt_bin_tab   TYPE solix_tab,
+        lv_xstr_html TYPE xstring.
+
+*---------------------------------------------------------------------*
+* 1) Leer XML tipo TI — primero de ZCFDI_XML_40_XML, luego ZCFDI_XML_LOG
+*---------------------------------------------------------------------*
+  CLEAR lv_tabla_fuente.
+
+  " Buscar primero en tabla nueva ZCFDI_XML_40_XML (campo tipo STRING)
+  SELECT SINGLE xml
+    INTO lv_xml_str
+    FROM zcfdi_40_xml
+   WHERE bukrs    = p_bukrs
+     AND factura     = p_belnr
+     AND gjahr    = p_gjahr.
+
+
+  IF sy-subrc = 0 AND lv_xml_str IS NOT INITIAL.
+    lv_tabla_fuente = 'ZCFDI_XML_40_XML'.
+    lv_txt = lv_xml_str.
+  ELSE.
+    " Buscar en tabla anterior ZCFDI_XML_LOG (campo XSTRING o STRING)
+    SELECT SINGLE xml_req
+      INTO lv_xstr_in
+      FROM zcfdi_xml_log
+     WHERE bukrs    = p_bukrs
+       AND belnr    = p_belnr
+       AND gjahr    = p_gjahr
+       AND tipo_doc = 'TI'.
+
+    IF sy-subrc = 0 AND lv_xstr_in IS NOT INITIAL.
+      lv_tabla_fuente = 'ZCFDI_XML_LOG'.
+
+      TRY.
+          lo_conv_in = cl_abap_conv_in_ce=>create( encoding = 'UTF-8' ).
+          lo_conv_in->convert(
+            EXPORTING input  = lv_xstr_in
+            IMPORTING data   = lv_txt ).
+        CATCH cx_root INTO lx_conv.
+          MESSAGE lx_conv->get_text( ) TYPE 'E'.
+          RETURN.
+      ENDTRY.
+    ENDIF.
+  ENDIF.
+
+  IF lv_txt IS INITIAL.
+    MESSAGE 'No se encontró XML tipo TI en ninguna tabla (ZCFDI_XML_40_XML / ZCFDI_XML_LOG)' TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+  MESSAGE |XML Timbrado recuperado correctamente desde { lv_tabla_fuente }.| TYPE 'S'.
+
+*---------------------------------------------------------------------*
+* 2) Corregir cabecera malformada en memoria
+*---------------------------------------------------------------------*
+  IF lv_txt CS '<?xmlversion=' OR lv_txt CS '<?xmlversion ='.
+    REPLACE ALL OCCURRENCES OF '<?xmlversion' IN lv_txt WITH '<?xml version'.
+  ENDIF.
+
+  IF lv_txt CS '"1.0"encoding=' OR lv_txt CS '"1.0" encoding='.
+    REPLACE ALL OCCURRENCES OF '"1.0"encoding=' IN lv_txt WITH '"1.0" encoding='.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 3) Validar XML (sintaxis y estructura básica)
+*---------------------------------------------------------------------*
+  PERFORM validar_xml USING lv_txt CHANGING lv_valido lv_msg.
+  IF lv_valido = abap_false.
+    MESSAGE lv_msg TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 4) Crear directorio local C:\Temp si no existe
+*---------------------------------------------------------------------*
+  CALL METHOD cl_gui_frontend_services=>directory_create
+    EXPORTING
+      directory = lv_workdir
+    CHANGING
+      rc        = lv_rc
+    EXCEPTIONS
+      directory_create_failed  = 1
+      cntl_error               = 2
+      error_no_gui             = 3
+      directory_access_denied  = 4
+      directory_already_exists = 5
+      path_not_found           = 6
+      unknown_error            = 7
+      not_supported_by_gui     = 8
+      wrong_parameter          = 9
+      OTHERS                   = 10.
+
+  IF sy-subrc <> 0 AND sy-subrc <> 5.
+    MESSAGE |No se pudo crear C:\\Temp (verifique permisos). Código: { sy-subrc }| TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 5) Guardar XML limpio en UTF-8
+*---------------------------------------------------------------------*
+  CONCATENATE 'CFDI_Timbrado_' p_belnr '.xml' INTO lv_file.
+  CONCATENATE lv_workdir '\' lv_file INTO lv_full.
+
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING
+      text     = lv_txt
+      mimetype = 'text/xml; charset=UTF-8'
+    IMPORTING
+      buffer   = lv_xstr_html.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer = lv_xstr_html
+    TABLES
+      binary_tab = lt_bin_tab.
+
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename = lv_full
+      filetype = 'BIN'
+    CHANGING
+      data_tab = lt_bin_tab
+    EXCEPTIONS
+      file_write_error        = 1
+      invalid_type            = 2
+      no_batch                = 3
+      gui_refuse_filetransfer = 4
+      others                  = 5.
+
+  IF sy-subrc <> 0.
+    MESSAGE |No se pudo crear el archivo local { lv_full }| TYPE 'E'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 6) Abrir XML en navegador
+*---------------------------------------------------------------------*
+  CALL METHOD cl_gui_frontend_services=>execute
+    EXPORTING
+      document  = lv_full
+      operation = 'OPEN'
+    EXCEPTIONS
+      file_not_found = 1
+      others         = 2.
+
+  IF sy-subrc = 0.
+    MESSAGE |Archivo XML Timbrado abierto correctamente: { lv_full }| TYPE 'S'.
+  ELSE.
+    MESSAGE |No se pudo abrir el archivo local { lv_full }| TYPE 'I'.
+  ENDIF.
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* FORM VALIDAR_XML
+*---------------------------------------------------------------------*
+* Valida sintácticamente un XML (STRING) antes de abrirlo o procesarlo.
+* Compatible con SAP_BASIS 750 (sin sintaxis nueva ni expresiones inline)
+*---------------------------------------------------------------------*
+FORM validar_xml USING    p_xml_txt TYPE string
+                 CHANGING p_valido  TYPE abap_bool
+                          p_mensaje TYPE string.
+
+  DATA: lv_len        TYPE i,
+        lv_open_tag   TYPE string,
+        lv_close_tag  TYPE string,
+        lv_off        TYPE i,
+        lv_null_char  TYPE string.
+
+  CLEAR: p_valido, p_mensaje.
+  p_valido = abap_false.
+
+*---------------------------------------------------------------------*
+* 1) Verificar que el XML no esté vacío
+*---------------------------------------------------------------------*
+  lv_len = STRLEN( p_xml_txt ).
+  IF lv_len = 0.
+    p_mensaje = 'El XML está vacío o no se pudo recuperar.'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 2) Verificar que contenga el carácter "<"
+*---------------------------------------------------------------------*
+  FIND FIRST OCCURRENCE OF '<' IN p_xml_txt MATCH OFFSET lv_off.
+  IF sy-subrc <> 0.
+    p_mensaje = 'No se encontró ningún inicio de etiqueta XML ("<").'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 3) Validar cabecera XML estándar
+*---------------------------------------------------------------------*
+  IF p_xml_txt CS '<?xmlversion=' OR p_xml_txt CS '<?xmlversion ='.
+    p_mensaje = 'Cabecera XML malformada: falta espacio después de "xml".'.
+    RETURN.
+  ENDIF.
+
+  IF p_xml_txt NS '<?xml version='.
+    p_mensaje = 'Cabecera XML faltante o incorrecta.'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 4) Validar caracteres inválidos (NULL o #)
+*---------------------------------------------------------------------*
+  TRY.
+      lv_null_char = cl_abap_conv_in_ce=>uccp( '0000' ).
+    CATCH cx_root.
+      CLEAR lv_null_char.
+  ENDTRY.
+
+  IF lv_null_char IS NOT INITIAL AND p_xml_txt CS lv_null_char.
+    p_mensaje = 'El XML contiene caracteres NULL no válidos.'.
+    RETURN.
+  ENDIF.
+
+  IF p_xml_txt CS '#'.
+    p_mensaje = 'El XML contiene caracteres "#" no válidos o mal codificados.'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 5) Validar estructura mínima: etiqueta raíz de apertura/cierre
+*---------------------------------------------------------------------*
+  FIND FIRST OCCURRENCE OF REGEX '<([A-Za-z0-9:_\-]+)' IN p_xml_txt
+       SUBMATCHES lv_open_tag.
+
+  FIND FIRST OCCURRENCE OF REGEX '</([A-Za-z0-9:_\-]+)>' IN p_xml_txt
+       SUBMATCHES lv_close_tag.
+
+  IF lv_open_tag IS INITIAL OR lv_close_tag IS INITIAL.
+    p_mensaje = 'No se encontró estructura XML con etiquetas de apertura/cierre.'.
+    RETURN.
+  ENDIF.
+
+  IF lv_open_tag <> lv_close_tag.
+    CONCATENATE 'Etiqueta raíz no coincide: <' lv_open_tag '> ... </'
+                lv_close_tag '>.' INTO p_mensaje.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* 6) Validación exitosa
+*---------------------------------------------------------------------*
+  p_valido  = abap_true.
+  p_mensaje = 'XML válido y bien formado.'.
+
+ENDFORM.

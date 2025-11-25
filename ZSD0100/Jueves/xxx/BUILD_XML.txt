@@ -1,0 +1,41 @@
+  METHOD build_xml.
+
+    DATA: lv_xml  TYPE string,
+          ls_head TYPE zet_head_40.
+
+    " Copiar datos para validación
+    ls_head = is_head.
+
+    " Validar folio
+    IF ls_head-folio_xml IS INITIAL.
+*      ls_head-folio_xml = |SIN_FOLIO_{ sy-datum }|.
+      ls_head-folio_xml = |SIN_ID_{ sy-datum }_{ sy-uname }|.
+    ENDIF.
+
+    " Cabecera
+    me->build_cabecera(
+      EXPORTING is_head = ls_head
+      CHANGING  ct_xml  = lv_xml
+    ).
+
+    " Conceptos
+    me->build_conceptos( CHANGING ct_xml = lv_xml ).
+
+    " Impuestos totales
+    me->build_impuestos_totales(
+      EXPORTING
+        is_head    = ls_head
+        iv_version = '4.0'
+      CHANGING
+        ct_xml     = lv_xml
+    ).
+
+    " Cierre del comprobante
+    me->append_line( EXPORTING iv_line = '</cfdi:Comprobante>' CHANGING ct_xml = lv_xml ).
+
+    " Retornar XML completo
+    me->sanitizar_xml_final( CHANGING ct_xml = lv_xml ).
+
+    rv_xml = lv_xml.
+
+  ENDMETHOD.

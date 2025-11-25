@@ -1,0 +1,151 @@
+METHOD recuperar_datos_cfdi_receptor.
+  "============================================================
+  " Obtiene:
+  "  - KVGR1..KVGR4 de KNVV (prioridad por VKORG/VTWEG/SPART)
+  "  - Nombre (KNA1) y CP vigente (ADRC)
+  " Normaliza forma de pago (2 dígitos) y aplica regla SAT PPD→'99'
+  "============================================================
+
+  "---- Variables KNVV
+  DATA: lv_kvgr1 TYPE knvv-kvgr1,  " Uso CFDI
+        lv_kvgr2 TYPE knvv-kvgr2,  " Método de pago (PUE/PPD)
+        lv_kvgr3 TYPE knvv-kvgr3,  " Régimen fiscal
+        lv_kvgr4 TYPE knvv-kvgr4.  " Forma de pago (01..99)
+
+  DATA lv_got_knvv TYPE abap_bool VALUE abap_false.
+
+  CLEAR: lv_kvgr1, lv_kvgr2, lv_kvgr3, lv_kvgr4.
+
+  "---- 1) KNVV por área de ventas (si llega informada)
+  IF iv_vkorg IS NOT INITIAL AND iv_vtweg IS NOT INITIAL AND iv_spart IS NOT INITIAL.
+    SELECT SINGLE kvgr1, kvgr2, kvgr3, kvgr4
+      FROM knvv
+      INTO (@lv_kvgr1, @lv_kvgr2, @lv_kvgr3, @lv_kvgr4)
+      WHERE kunnr = @iv_kunnr
+        AND vkorg = @iv_vkorg
+        AND vtweg = @iv_vtweg
+        AND spart = @iv_spart.
+    IF sy-subrc = 0.
+      lv_got_knvv = abap_true.
+    ENDIF.
+  ENDIF.
+
+  "---- 2) Fallback: cualquier KNVV con al menos un KVGR informado
+  IF lv_got_knvv = abap_false.
+    SELECT kvgr1, kvgr2, kvgr3, kvgr4
+      FROM knvv
+      WHERE kunnr = @iv_kunnr
+        AND ( kvgr1 <> '' OR kvgr2 <> '' OR kvgr3 <> '' OR kvgr4 <> '' )
+      INTO (@lv_kvgr1, @lv_kvgr2, @lv_kvgr3, @lv_kvgr4)
+      UP TO 1 ROWS.
+    ENDSELECT.
+    IF sy-subrc = 0.
+      lv_got_knvv = abap_true.
+    ENDIF.
+  ENDIF.
+
+  "---- 3) Último recurso: cualquier registro KNVV del cliente
+  IF lv_got_knvv = abap_false.
+    SELECT kvgr1, kvgr2, kvgr3, kvgr4
+      FROM knvv
+      WHERE kunnr = @iv_kunnr
+      INTO (@lv_kvgr1, @lv_kvgr2, @lv_kvgr3, @lv_kvgr4)
+      UP TO 1 ROWS.
+    ENDSELECT.
+  ENDIF.
+
+  "---- 4) Asignar salidas desde KVGR* y normalizar
+  CLEAR: ev_usocfdi, ev_metpag, ev_regfiscal, ev_formapago.
+  ev_usocfdi   = lv_kvgr1.   " KVGR1 → UsoCFDI
+  ev_metpag    = lv_kvgr2.   " KVGR2 → Método (PUE/PPD)
+  ev_regfiscal = lv_kvgr3.   " KVGR3 → Régimen fiscal
+  ev_formapago = lv_kvgr4.   " KVGR4 → Forma de pago (01..99)
+
+  TRANSLATE ev_usocfdi   TO UPPER CASE.
+  TRANSLATE ev_metpag    TO UPPER CASE.
+  TRANSLATE ev_regfiscal TO UPPER CASE.
+  TRANSLATE ev_formapago TO UPPER CASE.
+
+  " Forma de pago: solo dígitos y 2 posiciones
+  IF ev_formapago IS NOT INITIAL.
+    DATA(lv_fp) = CONV string( ev_formapago ).
+    REPLACE ALL OCCURRENCES OF REGEX '[^0-9]' IN lv_fp WITH ''.
+    CASE strlen( lv_fp ).
+      WHEN 0. CLEAR ev_formapago.
+      WHEN 1. ev_formapago = |0{ lv_fp }|.
+      WHEN 2. ev_formapago = lv_fp.
+      WHEN OTHERS. ev_formapago = lv_fp+0(2).
+    ENDCASE.
+  ENDIF.
+
+  " Regla SAT: si es PPD y no hay forma, usar '99'
+  IF ev_metpag = 'PPD' AND ev_formapago IS INITIAL.
+    ev_formapago = '99'.
+  ENDIF.
+
+  "============================================================
+  " COMPLEMENTO dentro del mismo método: Nombre y CP vigente
+  "============================================================
+  CLEAR: ev_nombre, ev_domfiscal.
+
+  "---- 5) Nombre desde KNA1 (NAME1..NAME4)
+  DATA: lv_name1 TYPE kna1-name1,
+        lv_name2 TYPE kna1-name2,
+        lv_name3 TYPE kna1-name3,
+        lv_name4 TYPE kna1-name4,
+        lv_adrnr TYPE kna1-adrnr.
+
+  SELECT SINGLE name1, name2, name3, name4, adrnr
+    FROM kna1
+    INTO (@lv_name1, @lv_name2, @lv_name3, @lv_name4, @lv_adrnr)
+    WHERE kunnr = @iv_kunnr.
+
+  CONCATENATE lv_name1 lv_name2 lv_name3 lv_name4 INTO ev_nombre SEPARATED BY space.
+  CONDENSE ev_nombre.
+
+  "---- 6) CP vigente desde ADRC (más reciente con date_from <= hoy)
+  IF lv_adrnr IS NOT INITIAL.
+    DATA: lv_cp    TYPE adrc-post_code1,
+          lv_pais  TYPE adrc-country.
+
+    SELECT post_code1, country
+      FROM adrc
+      WHERE addrnumber = @lv_adrnr
+        AND date_from  <= @sy-datum
+      ORDER BY date_from DESCENDING
+      INTO (@lv_cp, @lv_pais)
+      UP TO 1 ROWS.
+    ENDSELECT.
+
+    " Fallback: cualquier entrada del ADRNR si no hubo vigente
+    IF lv_cp IS INITIAL.
+      SELECT SINGLE post_code1, country
+        FROM adrc
+        INTO (@lv_cp, @lv_pais)
+        WHERE addrnumber = @lv_adrnr.
+    ENDIF.
+
+    ev_domfiscal = lv_cp.
+
+    " Normalización de CP (sin parametría)
+    IF ev_domfiscal IS NOT INITIAL.
+      REPLACE ALL OCCURRENCES OF REGEX '[^0-9]' IN ev_domfiscal WITH ''.
+      IF lv_pais = 'MX'.
+        CASE strlen( ev_domfiscal ).
+          WHEN 4. ev_domfiscal = |0{ ev_domfiscal }|.
+          WHEN 5. " ok
+          WHEN OTHERS.
+            IF strlen( ev_domfiscal ) > 5.
+              ev_domfiscal = ev_domfiscal+0(5).
+            ENDIF.
+        ENDCASE.
+      ELSE.
+        " Para otros países no forzar longitud; solo limitar a 10
+        IF strlen( ev_domfiscal ) > 10.
+          ev_domfiscal = ev_domfiscal+0(10).
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDMETHOD.

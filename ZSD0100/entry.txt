@@ -1,0 +1,372 @@
+FORM entry
+  USING
+    return_code
+    us_screen.                                  "#EC CALLED "#EC NEEDED
+
+  DATA: lv_vbeln    TYPE vbeln_vf,
+        lt_messages TYPE STANDARD TABLE OF bapiret1,
+        lo_logger   TYPE REF TO zcl_logger,
+        lv_kunag    TYPE kunag,
+        lv_kdkg1    TYPE kdkg1,
+        lv_katr4    TYPE katr4.
+
+  DATA: sociedad             LIKE vbrk-bukrs,
+        sociedadtxt          TYPE string,
+        idiomas              TYPE checkbox,
+        facturatxt           TYPE vbeln,
+        asunto               TYPE string,
+        asunto2              TYPE so_obj_des,
+        clasefactura         TYPE fkart,
+        orgventas            TYPE vbrk-vkorg,
+        lf_retcode           TYPE sy-subrc,
+        v_erdat              TYPE vbrk-erdat,
+        lv_gjahr             TYPE zcfdi4_mxdi_xml-gjahr,
+        gv_first_sales_order TYPE vbeln_va,
+        vfacturab            TYPE zdocto_eka,
+        lwa_factura          LIKE LINE OF it_factura,
+        lv_fecha             TYPE sy-datum.
+
+  DATA: lv_idmsg TYPE symsgid VALUE 'ZCFDI_40'.
+
+  CONSTANTS: c_cfdi_33 TYPE char2 VALUE '33',
+             c_cfdi_40 TYPE char2 VALUE '40'.
+
+  FIELD-SYMBOLS:
+    <ls_message>  TYPE bapiret1,
+    <lt_factura>  LIKE it_factura,
+    <lwa_factura> LIKE lwa_factura.
+  DATA: vgjahr TYPE gjahr.
+
+  DATA: lv_addenda TYPE c.
+  DATA: ls_bkpf  TYPE bkpf.
+
+  DATA: ev_success TYPE  flag,
+        ev_message TYPE  string.
+
+  factura_swo = nast-objky.
+  tipofactura = nast-kschl.
+
+  MOVE nast-objky TO lv_vbeln.
+  MOVE nast-objky TO vfacturab.
+
+  CREATE OBJECT lo_logger
+    EXPORTING
+      iv_extnumber = lv_vbeln
+      iv_object    = c_log_objt
+      iv_subobject = c_log_subobj
+      iv_repid     = sy-repid.
+
+  IF nast-kschl = 'ZRF1'.
+    SELECT SINGLE bukrs erdat gjahr fkdat
+      INTO (sociedad, v_erdat, vgjahr, lv_fecha)
+      FROM vbrk
+      WHERE vbeln = lv_vbeln.
+
+    IF vgjahr IS INITIAL.
+      vgjahr = lv_fecha+0(4).
+    ENDIF.
+
+    SELECT SINGLE * INTO ls_bkpf FROM bkpf
+      WHERE bukrs = sociedad
+        AND belnr = lv_vbeln
+        AND gjahr = vgjahr.
+
+    IF sy-subrc = 0.
+
+      SELECT SINGLE uuid INTO (gv_e_uuid)
+        FROM zcfdi_head_40
+        WHERE belnr = lv_vbeln.
+
+      PERFORM validate_cfdi_40
+              USING
+                    nast-erdat
+                    gv_e_uuid
+                    lv_idmsg
+              CHANGING
+                    gv_e_error.
+
+      IF gv_e_error IS INITIAL.
+
+        DATA lo_cfdi      TYPE REF TO zcl_zmfcfdi40_mgs.
+        DATA lv_gjahr_loc TYPE gjahr.
+        DATA lv_get_err   TYPE string.
+
+        CREATE OBJECT lo_cfdi.
+
+
+        " 1) Obtener datos de factura (CHANGING tablas / IMPORTING escalares)
+        lo_cfdi->get_data_factura(
+          EXPORTING
+            iv_vbeln    = lv_vbeln
+            iv_fechadoc = nast-erdat
+          IMPORTING
+            ev_vgjahr   = lv_gjahr_loc
+            ev_error    = lv_get_err
+          CHANGING
+            ct_head_cfdi = gt_head_cfdi
+            ct_det_cfdi  = gt_det_cfdi ).
+
+        IF lv_get_err IS NOT INITIAL.
+          gv_e_error = lv_get_err.
+        ENDIF.
+        DATA: lv_url_z TYPE zqr40.
+        DATA: lv_uuid_z TYPE zuuid.
+        " 2) Determinar primer pedido (si lo necesitas después)
+        DATA: lv_first_so TYPE vbeln_va,
+              lv_mrnkz    TYPE abap_bool,
+              lv_bstkd    TYPE bstkd,
+              lv_fill_err TYPE string.
+
+        lo_cfdi->llena_tabla_principal_fm(
+          EXPORTING
+            iv_vbeln = lv_vbeln
+          IMPORTING
+            ev_first_sales_order = lv_first_so
+            ev_collect_positions = lv_mrnkz
+            ev_purchase_no       = lv_bstkd
+            ev_error             = lv_fill_err ).
+
+        gv_first_sales_order = lv_first_so.
+
+        IF gt_head_cfdi IS NOT INITIAL.
+          CLEAR gv_e_error.
+
+          " 3) Timbrar
+
+
+          lo_cfdi->timbrar(
+   EXPORTING
+     t_head_cfdi     = gt_head_cfdi
+     t_det_cfdi      = gt_det_cfdi
+     iv_fix_fecha    = abap_true
+     iv_fix_importes = abap_true
+     i_addenda       = ''
+   IMPORTING
+     e_uuid          = lv_uuid_z
+     e_url           = lv_url_z
+     e_error         = lv_error_z ).
+          " Llamada correcta:
+          lo_cfdi->timbrar(
+            IMPORTING
+              e_uuid  = lv_uuid_z
+              e_error = gv_e_error
+              e_url   = gv_e_url
+            CHANGING
+              po_logger = lo_logger
+            exporting
+              t_head_cfdi     = gt_head_cfdi
+              t_det_cfdi      = gt_det_cfdi
+              i_addenda       = lv_addenda
+              i_pedido        = gv_first_sales_order
+              iv_fix_importes = abap_true
+              iv_fix_fecha    = abap_true ).
+
+          gv_e_uuid = lv_uuid_z.
+
+          IF gv_e_error IS INITIAL.
+
+            SELECT * INTO TABLE it_factura
+              FROM zcfdi_head_40
+              WHERE belnr EQ lv_vbeln.
+
+            SELECT SINGLE bukrs erdat gjahr INTO (sociedad, v_erdat, vgjahr)
+              FROM vbrk
+              WHERE vbeln = lv_vbeln.
+            IF sy-subrc EQ 0.
+              lv_gjahr = v_erdat+0(4).
+            ELSE.
+              CALL METHOD lo_logger->add_message
+                EXPORTING
+                  iv_msgty = 'E'
+                  iv_msgid = lv_idmsg
+                  iv_msgno = '000'
+                  iv_msgv1 = 'error al buscar factura en tabla vbrk'.
+            ENDIF.
+            CLEAR retcode.
+            xscreen = us_screen.
+
+            IF NOT it_factura IS INITIAL.
+              PERFORM processing
+                                TABLES it_factura
+                                  USING us_screen
+                                 CHANGING lf_retcode sociedad clasefactura orgventas.
+              IF lf_retcode NE 0.
+                return_code = 1.
+
+                CALL METHOD lo_logger->add_message
+                  EXPORTING
+                    iv_msgty = 'E'
+                    iv_msgid = lv_idmsg
+                    iv_msgno = '000'
+                    iv_msgv1 = 'Error recuperar smartforms'.
+
+              ELSE.
+                CONCATENATE 'Factura -' lv_vbeln INTO asunto2 SEPARATED BY space.
+
+                PERFORM anexa_factura
+                  TABLES it_pdf
+                  USING asunto2 lv_idmsg
+                  CHANGING lo_logger.
+
+                lo_cfdi->anexa_factura_gos(
+                  EXPORTING
+                    iv_factura     = lv_vbeln
+                    iv_archivo     = v_filename
+                    iv_descripcion = asunto2
+                    iv_servidor    = ''
+                    it_pdf         = it_pdf
+                  CHANGING
+                    po_logger      = lo_logger ).
+
+                lo_cfdi->zfi_update_text(
+                  EXPORTING
+                    iv_belnr    = lv_vbeln
+                    iv_gjahr    = lv_gjahr
+                    iv_bukrs    = sociedad
+                    iv_uuid     = lv_uuid_z
+                    iv_tdobject = 'VBBK'
+                  IMPORTING
+                    ev_success  = ev_success
+                    ev_message  = ev_message ).
+
+                CALL METHOD lo_logger->add_message
+                  EXPORTING
+                    iv_msgty = 'W'
+                    iv_msgid = lv_idmsg
+                    iv_msgno = '000'
+                    iv_msgv1 = ev_success
+                    iv_msgv2 = ev_message.
+
+                return_code = 0.
+
+              ENDIF.
+
+            ELSE.
+              return_code = 1.
+              CALL METHOD lo_logger->add_message
+                EXPORTING
+                  iv_msgty = 'E'
+                  iv_msgid = lv_idmsg
+                  iv_msgno = '000'
+                  iv_msgv1 = 'Error reperar tabla  it_factura'.
+            ENDIF.
+          ELSE.
+            CALL METHOD lo_logger->add_message
+              EXPORTING
+                iv_msgty = 'E'
+                iv_msgid = lv_idmsg
+                iv_msgno = '000'
+                iv_msgv1 = gv_e_error.
+          ENDIF.
+
+        ELSE.
+          CALL METHOD lo_logger->add_message
+            EXPORTING
+              iv_msgty = 'E'
+              iv_msgid = lv_idmsg
+              iv_msgno = '000'
+              iv_msgv1 = 'Error en obtener Factura de BD'
+              iv_msgv2 = lv_vbeln.
+        ENDIF.
+
+      ELSE.
+
+        CALL METHOD lo_logger->add_message
+          EXPORTING
+            iv_msgty = 'E'
+            iv_msgid = lv_idmsg
+            iv_msgno = '000'
+            iv_msgv1 = gv_e_error
+            iv_msgv2 = lv_vbeln.
+      ENDIF.
+    ELSE.
+      CALL METHOD lo_logger->add_message
+        EXPORTING
+          iv_msgty = 'E'
+          iv_msgid = lv_idmsg
+          iv_msgno = '000'
+          iv_msgv1 = 'Factura no contabilizada / No Genera CFDI 4.0'
+          iv_msgv2 = lv_vbeln.
+
+    ENDIF.
+
+  ENDIF.
+
+  "=== ENVIAR PDF (ZRF2) – sin cambios de lógica de timbrado ===
+  IF nast-kschl = 'ZRF2'.
+    PERFORM get_data_factura USING lv_vbeln nast-erdat.
+    PERFORM llena_tabla_pricipal_fm CHANGING  gv_first_sales_order.
+    IF gt_head_cfdi IS NOT INITIAL.
+      SELECT * INTO TABLE it_factura FROM zcfdi_head_40 WHERE belnr EQ lv_vbeln.
+
+      SELECT SINGLE bukrs erdat gjahr INTO (sociedad, v_erdat, vgjahr)
+        FROM vbrk
+        WHERE vbeln = lv_vbeln.
+      IF sy-subrc EQ 0.
+        lv_gjahr = v_erdat+0(4).
+      ELSE.
+        CALL METHOD lo_logger->add_message
+          EXPORTING
+            iv_msgty = 'E'
+            iv_msgid = lv_idmsg
+            iv_msgno = '000'
+            iv_msgv1 = 'error al buscar factura en tabla vbrk.'.
+      ENDIF.
+      CLEAR retcode.
+      xscreen = us_screen.
+      IF it_factura IS NOT INITIAL.
+        PERFORM processing_pdf
+              TABLES
+                    it_factura
+              USING
+                    us_screen
+                    cname_pdf
+              CHANGING
+                    lf_retcode
+                    sociedad
+                    clasefactura
+                    orgventas.
+        IF lf_retcode NE 0.
+          return_code = 1.
+          CALL METHOD lo_logger->add_message
+            EXPORTING
+              iv_msgty = 'E'
+              iv_msgid = lv_idmsg
+              iv_msgno = '000'
+              iv_msgv1 = 'Error recuperar PDF Smartforms'.
+        ELSE.
+          CONCATENATE 'Factura -' lv_vbeln INTO asunto SEPARATED BY space.
+          PERFORM anexa_factura TABLES it_pdf USING asunto lv_idmsg CHANGING lo_logger.
+          CALL FUNCTION 'ZFI_UPDATE_TEXT'
+            EXPORTING
+              iv_belnr = lv_vbeln
+              iv_gjahr = vgjahr
+              iv_bukrs = sociedad
+              iv_uuid  = gv_e_uuid.
+          return_code = 0.
+        ENDIF.
+      ELSE.
+        return_code = 1.
+        CALL METHOD lo_logger->add_message
+          EXPORTING
+            iv_msgty = 'E'
+            iv_msgid = lv_idmsg
+            iv_msgno = '000'
+            iv_msgv1 = 'Error reperar tabla  it_factura'.
+      ENDIF.
+    ELSE.
+      CALL METHOD lo_logger->add_message
+        EXPORTING
+          iv_msgty = 'E'
+          iv_msgid = lv_idmsg
+          iv_msgno = '000'
+          iv_msgv1 = 'Error en obtener Factura de BD'
+          iv_msgv2 = lv_vbeln.
+    ENDIF.
+  ENDIF.
+
+  PERFORM update_from_logger
+    USING lo_logger
+    CHANGING return_code nast.
+
+ENDFORM.                    "ENTRY

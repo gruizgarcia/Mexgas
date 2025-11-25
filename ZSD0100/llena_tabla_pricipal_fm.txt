@@ -1,0 +1,98 @@
+FORM llena_tabla_pricipal_fm CHANGING  gv_first_sales_order TYPE vbeln_va.
+
+  DATA:
+    ct_vbak              TYPE ztt_cfdi_vbak,
+    ct_vbap              TYPE ztt_cfdi_vbap,
+    gv_collect_positions TYPE abap_bool,
+    gv_purchase_no       TYPE bstkd.
+
+
+
+  DATA: lt_positions_nd      TYPE vbrp_tab.
+
+*  Data: GT_POSITIONS TYPE VBRP_TAB,
+
+
+  FIELD-SYMBOLS: <ls_position> TYPE vbrpvb,
+                 <ls_vbap>     TYPE zst_cfdi_vbap.
+
+  READ TABLE gt_positions ASSIGNING <ls_position> INDEX 1.
+  IF sy-subrc EQ 0.
+    gv_first_sales_order = <ls_position>-aubel. " Documento de venta de la primera posición
+  ENDIF.
+
+  REFRESH lt_positions_nd.
+  APPEND LINES OF gt_positions TO lt_positions_nd.
+  SORT lt_positions_nd BY aubel.
+  DELETE ADJACENT DUPLICATES FROM lt_positions_nd COMPARING aubel.
+
+* Obtiene las cabeceras de los presupuestos.
+  REFRESH ct_vbak.
+  SELECT  vbeln
+*          zzcts
+*          zzpartida
+*          zzcantid
+*          zzfolio
+**          addenda01
+*          addenda02
+*          addenda03
+*          addenda04
+*          addenda05
+*          addenda06
+*          addenda07
+*          addenda08
+*          addenda09
+    FROM vbak
+    INTO TABLE ct_vbak
+    FOR ALL ENTRIES IN lt_positions_nd
+    WHERE vbeln EQ lt_positions_nd-aubel.
+  IF sy-subrc EQ 0.
+    SORT ct_vbak BY vbeln.
+  ENDIF.
+
+* Obtiene las posiciones de los presupuestos.
+  IF ct_vbak[] IS NOT INITIAL.
+
+    REFRESH ct_vbap.
+    SELECT  vbeln
+            posnr
+            ps_psp_pnr
+*            zzcargue
+*            addenda01
+*            addenda02
+*            addenda03
+*            addenda04
+*            addenda05
+*            addenda06
+*            addenda07
+*            addenda08
+*            addenda09
+*            addenda10
+      FROM vbap
+      INTO TABLE ct_vbap
+      FOR ALL ENTRIES IN ct_vbak
+      WHERE vbeln EQ ct_vbak-vbeln.
+    IF sy-subrc EQ 0.
+      SORT ct_vbap BY vbeln .
+    ENDIF.
+
+  ENDIF.
+
+  READ TABLE ct_vbap ASSIGNING <ls_vbap> INDEX 1.
+  IF sy-subrc EQ 0.
+
+*   Obtiene el indicador "Tratamiento manual posterior de la factura".
+*   Si está activo se activa la bandera que realiza la sumatoria de los conceptos.
+    SELECT SINGLE mrnkz bstkd
+      FROM vbkd
+      INTO (gv_collect_positions, gv_purchase_no)
+      WHERE vbeln EQ <ls_vbap>-vbeln.                       "#EC *
+    IF sy-subrc NE 0.
+      RETURN.
+    ENDIF.
+
+  ENDIF.
+
+
+
+ENDFORM.

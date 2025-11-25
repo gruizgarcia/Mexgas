@@ -1,0 +1,2593 @@
+FUNCTION zmfcfdi40_mgs.
+*"----------------------------------------------------------------------
+*"*"Interfase local
+*"  IMPORTING
+*"     REFERENCE(T_HEAD_CFDI) TYPE  ZST_HEAD_40
+*"     REFERENCE(T_DET_CFDI) TYPE  ZST_DET_40
+*"     REFERENCE(I_ADDENDA) TYPE  CHAR1
+*"     REFERENCE(I_PEDIDO) TYPE  VBELN_VA
+*"  EXPORTING
+*"     REFERENCE(E_UUID) TYPE  ZUUID
+*"     REFERENCE(E_ERROR) TYPE  STRING
+*"     REFERENCE(E_URL) TYPE  ZQR40
+*"  CHANGING
+*"     REFERENCE(PO_LOGGER) TYPE REF TO  ZCL_LOGGER OPTIONAL
+*"----------------------------------------------------------------------
+
+  TYPES: BEGIN OF gs_lxml,
+           data(256) TYPE x,
+         END OF gs_lxml,
+         ty_gt_lxml TYPE TABLE OF gs_lxml.
+  "variables para recupera url qr
+  DATA : vuuid             TYPE zcfdi_head_40-uuid,
+         vftimbrado        TYPE zcfdi_head_40-fecha_timbrado,
+         vsellosat         TYPE zcfdi_head_40-sello_sat,
+         vsello_cfd        TYPE zcfdi_head_40-sello_cfd,
+         vemisor           TYPE zcfdi_head_40-rfc_emisor,
+         vreceptor         TYPE zcfdi_head_40-REGIMENFISCALRECEPTOR,
+         vrfcprovcertif    TYPE zcfdi_head_40-rfcprovcertif,
+         vnocertificado    TYPE zcfdi_head_40-nocertificado,
+         vnocertificadosat TYPE zcfdi_head_40-nocertificadosat,
+         vmonedaxml        TYPE zcfdi_head_40-monedaxml,
+         vexportacion      TYPE zcfdi_head_40-exportacion,
+         vtipocambioxml    TYPE zcfdi_head_40-tipocambioxml,
+         vFechaFac         TYPE zcfdi_head_40-FechaFact,
+
+         vextranjero       TYPE c,
+         ptotal            TYPE char18,
+         pselloemisor      TYPE zcfdi_head_40-sello_sat,
+         vqr               TYPE zcfdi_head_40-qr,
+         fecha_f           TYPE d,
+         c_input           TYPE bus_time-date_char,
+         c_input2          TYPE bus_time-date,
+         v_ukurs           LIKE tcurr-ukurs.
+
+  DATA: ls_40xml     TYPE zcfdi_40_xml,
+        ls_head      TYPE zcfdi_head_40,
+        ls_det       TYPE zcfdi_det_40,
+        lv_prod      TYPE zcfdi_det_40-prod_eka,
+        lv_desc      TYPE zcfdi_det_40-descripcion,
+        aux_string   TYPE string,
+        aux_string2  TYPE string,
+        lv_metpag    TYPE string,
+        lv_comprob   TYPE string,
+        lv_fp        TYPE string,
+        lv_datum     TYPE sy-datum,
+        lv_uzeit     TYPE sy-uzeit,
+        fecha        TYPE string,
+        lv_serie     TYPE char4,
+        lv_serie_ad  TYPE char4,
+        lv_glp       TYPE char1,
+        lv_folio     TYPE char6,
+        lv_usocfdi   TYPE char3,
+        bapi_cco     TYPE bapi0002_2-comp_code,
+        bapi_adr     LIKE bapi0002_3,
+        it_cat3p3    TYPE TABLE OF zfe_cat3p3,
+        st_cat3p3    TYPE zfe_cat3p3,
+        lt_conver    TYPE STANDARD TABLE OF zequival_40,
+        lw_conver    TYPE zequival_40,
+        lv_impuesto  TYPE dmbtr,
+        gt_xmltable  TYPE ty_gt_lxml,
+        r_nr         TYPE inri-nrrangenr,
+        v_last_day   TYPE sy-datum,
+        vcoriginal   TYPE zcfdi_head_40-cadena_original,
+        vfechatimbre TYPE zcfdi_head_40-fechatimbrados.
+
+*- Armado XML
+  DATA: lr_ixml             TYPE REF TO if_ixml,
+        gr_ld               TYPE REF TO if_ixml_document,
+        lr_comprobante      TYPE REF TO if_ixml_element,
+        lr_fdirelacionados  TYPE REF TO if_ixml_element,
+        lr_fdirelacionado   TYPE REF TO if_ixml_element,
+        lr_mercancias       TYPE REF TO if_ixml_element,
+        lr_mercancia        TYPE REF TO if_ixml_element,
+        lr_domicilio        TYPE REF TO if_ixml_element,
+        lr_emisor           TYPE REF TO if_ixml_element,
+        lr_receptor         TYPE REF TO if_ixml_element,
+        lr_complemento      TYPE REF TO if_ixml_element,
+        lr_diremisor        TYPE REF TO if_ixml_element,
+        lr_dirreceptor      TYPE REF TO if_ixml_element,
+        lr_po               TYPE REF TO if_ixml_element,
+        lr_pedido           TYPE REF TO if_ixml_element,
+        lr_tipoprov         TYPE REF TO if_ixml_element,
+        lr_posiciones       TYPE REF TO if_ixml_element,
+        lr_posicion         TYPE REF TO if_ixml_element,
+        lr_impuestos        TYPE REF TO if_ixml_element,
+        lr_traslados        TYPE REF TO if_ixml_element,
+        lr_traslado         TYPE REF TO if_ixml_element,
+        lr_retenciones      TYPE REF TO if_ixml_element,
+        lr_retencion        TYPE REF TO if_ixml_element,
+        lr_conceptos        TYPE REF TO if_ixml_element,
+        lr_concepto         TYPE REF TO if_ixml_element,
+        lr_comercioexterior TYPE REF TO if_ixml_element,
+        lr_addenda          TYPE REF TO if_ixml_element,
+        lr_addendapemex     TYPE REF TO if_ixml_element,
+        lr_addendaaux       TYPE REF TO if_ixml_element,
+        lr_documento        TYPE REF TO if_ixml_element,
+        lr_encabezado       TYPE REF TO if_ixml_element,
+        lr_detalle          TYPE REF TO if_ixml_element,
+        lr_hojaservicio     TYPE REF TO if_ixml_element,
+        lr_recepcion        TYPE REF TO if_ixml_element,
+        lr_transporte       TYPE REF TO if_ixml_element,
+        lr_ctaxpag          TYPE REF TO if_ixml_element,
+        lr_liquidacion      TYPE REF TO if_ixml_element,
+        lr_anexos           TYPE REF TO if_ixml_element,
+        lr_anexo            TYPE REF TO if_ixml_element,
+        lr_sf               TYPE REF TO if_ixml_stream_factory,
+        lr_ostream          TYPE REF TO if_ixml_ostream,
+        lr_encoding         TYPE REF TO if_ixml_encoding,
+        lr_renderer         TYPE REF TO if_ixml_renderer,
+        lr_urndomicilios    TYPE REF TO if_ixml_element,
+        lr_domicilios       TYPE REF TO if_ixml_element,
+        lr_customdata       TYPE REF TO if_ixml_element,
+        lr_datosdeimpresion TYPE REF TO if_ixml_element,
+        lr_datos1           TYPE REF TO if_ixml_element,
+        lr_diconceptos      TYPE REF TO if_ixml_element,
+        lr_diconcepto       TYPE REF TO if_ixml_element,
+        lr_conc_pdf         TYPE REF TO if_ixml_element,
+        lr_conc_det         TYPE REF TO if_ixml_element,
+        ls_success          TYPE boolean,
+        ls_rc               TYPE i,
+        gf_xmlsize          TYPE i.
+
+*- Constantes
+***Constantes
+  CONSTANTS: c_xdef              TYPE c LENGTH 2  VALUE '99',
+             c_cebem             TYPE c LENGTH 7  VALUE 'C_CEBEM',
+             c_metodopago        TYPE c LENGTH 12 VALUE 'C_METODOPAGO',
+             c_tipodecomprobante TYPE c LENGTH 20 VALUE 'C_TIPODECOMPROBANTE',
+             c_formapago         TYPE c LENGTH 12 VALUE 'C_FORMAPAGO',
+             c_pse               TYPE c LENGTH 3  VALUE 'PSE',
+             c_tcs               TYPE c LENGTH 3  VALUE 'TCS',
+             c_uniaduana         TYPE c LENGTH 21 VALUE 'C_UNIDADMEDIDAADUANA',
+             c_claveunidad       TYPE c LENGTH 13 VALUE 'C_CLAVEUNIDAD',
+             c_claveunidadfin    TYPE c LENGTH 16 VALUE 'C_CLAVEUNIDADFIN',
+             c_claveunidadsa     TYPE c LENGTH 15 VALUE 'C_CLAVEUNIDADSA',
+             c_regimenfiscal     TYPE c LENGTH 15 VALUE 'C_REGIMENFISCAL',
+             c_usocfdi           TYPE c LENGTH 9  VALUE 'C_USOCFDI',
+             c_tipofactor        TYPE c LENGTH 12 VALUE 'C_TIPOFACTOR',
+             c_continental       TYPE c LENGTH 15 VALUE 'C_CONTINENTAL',
+             c_ahmsa             TYPE c LENGTH 8  VALUE 'C_AHMSA',
+             c_claveprodserv     TYPE c LENGTH 15 VALUE 'C_CLAVEPRODSERV',
+             c_claveprodfin      TYPE c LENGTH 14 VALUE 'C_CLAVEPRODFIN',
+             c_claveprodfin8     TYPE c LENGTH 15 VALUE 'C_CLAVEPRODFIN8',
+             c_claveprodsa       TYPE c LENGTH 13 VALUE 'C_CLAVEPRODSA',
+             c_numidefin         TYPE c LENGTH 11 VALUE 'C_NUMIDEFIN',
+             c_numidesa          TYPE c LENGTH 10 VALUE 'C_NUMIDESA',
+             c_cebec             TYPE c LENGTH 7  VALUE 'C_CEBEC',
+             c_pais              TYPE c LENGTH 6  VALUE 'C_PAIS',
+             c_tipocfdi          TYPE c LENGTH 10 VALUE 'C_TIPOCFDI',
+             c_comercioext       TYPE c LENGTH 2  VALUE 'CE',
+             c_nacional          TYPE c LENGTH 2  VALUE 'NA',
+             c_nodo              TYPE c LENGTH 3  VALUE '12@',
+             v_verexp(3)         TYPE c VALUE '1.0',
+             v_cveped(2)         TYPE c VALUE 'A1',
+             v_corigen(1)        TYPE c VALUE '0',
+             v_subdiv(1)         TYPE c VALUE '0',
+             v_umexp(2)          TYPE c VALUE '06',
+             v_municpio(3)       TYPE c VALUE '120',
+             c_16                TYPE p DECIMALS 2 VALUE '0.16',
+             c_pue(3)            VALUE 'PUE',
+             c_ppd(3)            VALUE 'PPD',
+             c_i(1)              VALUE 'I',
+             c_e(1)              VALUE 'E',
+             c_ineka(9)          VALUE 'ZFI_V40',    "Serie Gas LP
+             c_ineka1(10)        VALUE 'ZFI_V40',   "Serie Gas Natural
+             c_cneka(9)          VALUE 'ZFI_CNEKA',    "Serie Gas LP
+             c_cneka1(10)        VALUE 'ZFI_CNEKA1',   "Serie Gas Natural
+             c_dneka(9)          VALUE 'ZFI_DNEKA',    "Serie Gas LP
+             c_dneka1(10)        VALUE 'ZFI_DNEKA1',   "Serie Gas Natural
+             c_nc(15)            VALUE 'NOTA DE CREDITO',
+             c_nd(14)            VALUE 'NOTA DE DEBITO',
+             c_fact(7)           VALUE 'FACTURA',
+             c_99(2)             VALUE '99',
+             c_03(2)             VALUE '03',
+             c_02(2)             VALUE '02',
+             c_programa(13)      VALUE 'ZMFCFDI40_MGS',
+             c_pathxml(15)       VALUE 'DOWNLOADXMLSAP',
+             c_usd(3)            TYPE c VALUE 'USD',
+             c_mxn(3)            TYPE c VALUE 'MXN'.
+
+
+
+  DATA: va_xml_string TYPE string,
+        va_dat_string TYPE string,
+        va_dom_string TYPE string,
+        lv_input      TYPE i VALUE 100000,
+        v_ruta        TYPE string.
+
+
+*- Timbrado
+  TYPES: BEGIN OF ty_adr6,
+           smtp_addr TYPE ad_smtpadr,
+         END OF ty_adr6,
+
+         BEGIN OF ty_adr6_2,
+           addrnumber TYPE ad_addrnum,
+           consnumber TYPE ad_consnum,
+           smtp_addr  TYPE ad_smtpadr,
+         END OF ty_adr6_2,
+
+         BEGIN OF ty_adrt,
+           addrnumber TYPE adrt-addrnumber,
+           consnumber TYPE ad_consnum,
+           remark     TYPE adrt-remark,
+         END OF ty_adrt.
+
+  DATA: ws_timbrardes TYPE REF TO ztest_co_iemision,
+        st_input_t    TYPE ztest_emitir_comprobante_reque,
+        st_output_t   TYPE ztest_emitir_comprobante_respo.
+
+  DATA: ws_timbrarpro TYPE REF TO zpro_co_iemision,
+        st_input_p    TYPE zpro_emitir_comprobante_reques,
+        ls_output     TYPE zpro_emitir_comprobante_respon.
+  DATA: lcl_cx_root TYPE REF TO cx_root.
+
+  DATA: ws_header TYPE REF TO if_wsprotocol_ws_header,
+        name      TYPE string,
+        namespace TYPE string.
+
+  DATA: ixml         TYPE REF TO if_ixml,
+        xml_document TYPE REF TO if_ixml_document,
+        xml_root     TYPE REF TO if_ixml_element,
+        xml_element  TYPE REF TO if_ixml_element,
+        xml_node     TYPE REF TO if_ixml_node.
+  DATA l_xstring        TYPE xstring.
+  DATA l_string         TYPE string.
+  DATA resstr TYPE string.
+  DATA: st_property TYPE ztest_transaction_property.
+  DATA: msg_error      TYPE string,
+        p_sello_emisor TYPE string,
+        p_sello_sat    TYPE string.
+
+  DATA: lw_transactionpro  TYPE zpro_array_of_transaction_prop,
+        lt_transactionspro TYPE zpro_transaction_property_tab,
+        lw_transactionspro TYPE zpro_transaction_property.
+
+  DATA: lv_adrnr     TYPE kna1-adrnr,
+        lv_adrnr_aux TYPE kna1-adrnr,
+        ti_adr6      TYPE TABLE OF ty_adr6,
+        st_adr6      TYPE ty_adr6,
+        ti_adr6_2    TYPE TABLE OF ty_adr6_2,
+        st_adr6_2    TYPE ty_adr6_2,
+        ti_adrt      TYPE TABLE OF ty_adrt,
+        st_adrt      TYPE ty_adrt,
+        lv_correos   TYPE string,
+        lv_value     TYPE char15,
+        lv_impeng    TYPE char15,
+        lv_remark    TYPE adrt-remark,
+        lv_estacion  TYPE vbak-kunnr,
+        lv_buffer    TYPE xstring,
+        gt_xml_data  TYPE TABLE OF smum_xmltb,
+        st_xml_data  TYPE smum_xmltb,
+        gt_return    TYPE TABLE OF bapiret2,
+        gt_cat       TYPE STANDARD TABLE OF zfe_cat_series,
+        gw_cat       TYPE zfe_cat_series,
+        lv_prod_eka  TYPE string,
+        lv_prod_sap  TYPE string,
+        lv_ind(2)    TYPE c,
+        lv_apikey    TYPE zfe_apikey-apikey.
+
+  DATA: lv_number(10) TYPE n,
+        lv_object     TYPE nrobj.
+
+  DATA: lv_permiso TYPE kna1-name3,
+        lv_est     TYPE vbpa-kunnr,
+        lt_adrc    TYPE TABLE OF adrc,
+        ls_adrc    TYPE adrc,
+        lv_kunag   TYPE vrkpa-kunag,
+        lv_name1   TYPE kna1-name1,
+        lv_zterm   TYPE knvv-zterm,
+        lv_ztag1   TYPE t052-ztag1,
+        lv_vtext   TYPE tvzbt-vtext,
+        lv_bztxt   TYPE t171t-bztxt,
+        lv_bzirk   TYPE t171t-bzirk,
+        lv_cond    TYPE tinct-bezei,
+        lv_kwert   TYPE konv-kwert,
+        lv_fcarga  TYPE datum,
+        lv_vbelv   TYPE vbfa-vbelv,
+        lv_vbtyp   TYPE vbfa-vbtyp_v.
+
+  DATA: lv_dato1         TYPE char10,
+        lv_dato2         TYPE char10,
+        lv_dato3         TYPE char10,
+        lv_dato4         TYPE char10,
+        lv_dato5         TYPE char10,
+        lv_observaciones TYPE string,
+        lv_name          TYPE tdobname,
+        lv_noorden       TYPE char10,
+        lv_destino       TYPE char30,
+        lv_lugarcarga    TYPE char30,
+        lv_feccarga      TYPE char10,
+        lv_vbeln         TYPE vbeln,
+        lv_bukrs         TYPE bukrs,
+        lv_pgjahr        TYPE gjahr.
+
+  DATA: lt_lines   TYPE STANDARD TABLE OF tline,
+        gv_cant    TYPE fkimg,
+        lv_addenda TYPE c.
+
+  DATA: BEGIN OF lt_pos OCCURS 0,
+          entrega TYPE string,
+          volumen TYPE string,
+          unidad  TYPE string,
+          idtrans TYPE string,
+          desc    TYPE string,
+          precio  TYPE string,
+          importe TYPE string,
+          moneda  TYPE string,
+        END OF lt_pos,
+        wa_pos LIKE LINE OF lt_pos.
+
+  FIELD-SYMBOLS: <fs_lines>   TYPE tline,
+                 <fs_xstring> TYPE xstring.
+
+
+****************************************************************************
+**    INICIA Modificacion Migracion CFDI 4.0 - MAM 01.06.2022
+****************************************************************************
+
+  DATA gt_parametros TYPE STANDARD TABLE OF zsulp_parametros.
+  DATA ls_parametros LIKE LINE OF gt_parametros.
+  DATA c_01(2) TYPE c VALUE '01'.
+  DATA c_version TYPE char3.
+  DATA c_4p0 TYPE char3 VALUE '4.0'.
+  DATA lt_kna1_s TYPE STANDARD TABLE OF kna1.
+  DATA lt_knvv_s TYPE STANDARD TABLE OF knvv.
+  DATA st_kna1_s TYPE kna1.
+  DATA st_knvv_s TYPE knvv.
+  DATA lv_ext TYPE c.
+  DATA c_x TYPE c VALUE 'X'.
+  DATA c_s01 TYPE char3 VALUE 'S01'.
+  DATA c_616 TYPE char3 VALUE '616'.
+  DATA c_610 TYPE char3 VALUE '610'.
+
+  SELECT *
+    FROM zsulp_parametros
+    INTO TABLE gt_parametros.
+
+****************************************************************************
+**    FIN Modificacion Migracion CFDI 4.0 - MAM 01.06.2022
+****************************************************************************
+  CLEAR: lw_conver, ls_output.
+  REFRESH lt_conver.
+
+  SELECT *
+    FROM zfe_cat_series
+    INTO CORRESPONDING FIELDS OF TABLE gt_cat.
+
+  SELECT *
+    FROM zequival_40
+    INTO CORRESPONDING FIELDS OF TABLE lt_conver.
+
+
+*  SELECT kunnr, name1, adrnr                                          "<RPL> MAM 01.06.2022 CFDI 4.0
+  SELECT kunnr, land1, name1, name2, name3, name4,pstlz, adrnr, katr6  "<ADD> MAM 01.06.2022 CFDI 4.0
+   FROM kna1
+   INTO TABLE @DATA(lt_kna1)
+   FOR ALL ENTRIES IN @t_head_cfdi
+   WHERE kunnr = @t_head_cfdi-kunnr.
+
+****************************************************************************
+
+****************************************************************************
+  SELECT *
+    FROM kna1
+    INTO TABLE lt_kna1_s
+    FOR ALL ENTRIES IN t_head_cfdi
+    WHERE kunnr = t_head_cfdi-kunnr.
+*KUNNR
+*VKORG
+*VTWEG
+*SPART
+
+  SELECT *
+FROM knvv
+INTO TABLE lt_knvv_s
+FOR ALL ENTRIES IN t_head_cfdi
+WHERE kunnr = t_head_cfdi-kunnr
+      AND vkorg = t_head_cfdi-vkorg
+      AND vtweg = t_head_cfdi-vtweg
+      AND spart = t_head_cfdi-spart
+    .
+****************************************************************************
+
+****************************************************************************
+
+
+  LOOP AT t_head_cfdi INTO ls_head.
+
+*    CALL METHOD po_logger->add_message
+*      EXPORTING
+*        iv_msgty = 'I'
+*        iv_msgid = 'ZCFDI_40'
+*        iv_msgno = '100'
+*        iv_msgv1 = 'Ingreso funcion '
+*        iv_msgv2 = ls_head-factura.
+
+*    LV_VBELN  =  ls_head-factura.
+    lv_bukrs  =  ls_head-bukrs.
+    lv_pgjahr  =  ls_head-gjahr.
+
+    READ TABLE lt_kna1 INTO DATA(ls_kna1) WITH KEY kunnr = ls_head-kunnr.
+
+*->INICIA Modificacion Migracion CFDI 4.0 MAM 01.06.2022
+*Para recuperar el parametro de la version  4.0
+    CLEAR ls_parametros.
+    READ TABLE gt_parametros INTO ls_parametros WITH KEY bukrs     = ls_head-bukrs
+*                                                         programa  = sy-cprog
+*                                                         programa  = c_programa
+                                                         parametro = 'CFDI'
+                                                         field     = 'VERSION'.
+    IF sy-subrc EQ 0.
+      c_version = ls_parametros-value.
+    ENDIF.
+*<-FIN Modificacion Migracion CFDI 4.0 MAM 01.06.2022
+
+* CREAR DOCUMENTO
+    CLEAR: lv_value, lv_adrnr_aux.
+    lv_adrnr_aux = ls_kna1-adrnr.
+
+    lr_ixml = cl_ixml=>create( ).
+    gr_ld  = lr_ixml->create_document( ).
+
+* ATRIBUTOS DEL COMPROBANTE
+    lr_comprobante = gr_ld->create_simple_element(
+    name    = 'cfdi:Comprobante'
+    parent  = gr_ld  ).
+
+*<-INICIA Modificacion Migracion CFDI 4.0 MAM 01.06.2022
+    IF c_version EQ c_4p0.
+
+      lr_comprobante->set_attribute(
+      name  = 'xsi:schemaLocation'
+      value = 'http://www.sat.gob.mx/cfd/4 http://www.sat.gob.mx/sitio_internet/cfd/4/cfdv40.xsd').
+
+      lr_comprobante->set_attribute(
+      name  = 'xmlns:xsi'
+      value = 'http://www.w3.org/2001/XMLSchema-instance').
+
+      lr_comprobante->set_attribute(
+      name  = 'xmlns:cfdi'
+      value = 'http://www.sat.gob.mx/cfd/4').
+    ELSE.
+*<-FIN Modificacion Migracion CFDI 4.0 MAM 01.06.2022
+      lr_comprobante->set_attribute(
+       name  = 'xsi:schemaLocation'
+       value = 'http://www.sat.gob.mx/cfd/3 http://www.sat.gob.mx/sitio_internet/cfd/3/cfdv33.xsd').
+
+      lr_comprobante->set_attribute(
+      name  = 'xmlns:xsi'
+      value = 'http://www.w3.org/2001/XMLSchema-instance').
+
+      lr_comprobante->set_attribute(
+      name  = 'xmlns:cfdi'
+      value = 'http://www.sat.gob.mx/cfd/3').
+    ENDIF.                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+
+
+*-Se retrasa 10 seg la hora para evitar conflictos con hora de servidor del PAC
+    IF sy-uzeit BETWEEN '000000' AND '000009'.
+      lv_datum = sy-datum - 1.
+    ELSE.
+*      lv_datum = sy-datum.
+      lv_datum = ls_head-bldat.
+    ENDIF.
+    lv_uzeit = sy-uzeit - 10.
+
+    CONCATENATE
+     lv_datum(4)    '-'
+     lv_datum+4(2)  '-'
+     lv_datum+6(2)  'T'
+     lv_uzeit(2)    ':'
+     lv_uzeit+2(2)  ':'
+     lv_uzeit+4(2)  INTO fecha.
+    lr_comprobante->set_attribute( name  = 'Fecha' value = fecha ).
+
+
+    CLEAR st_kna1_s.
+    READ TABLE lt_knvv_s INTO st_knvv_s WITH KEY kunnr = ls_head-kunnr
+                                                 vkorg  = ls_head-vkorg
+                                                 vtweg  = ls_head-vtweg
+                                                 spart  = ls_head-spart.
+    IF sy-subrc EQ 0.
+      lv_metpag   = st_knvv_s-kvgr2."Meotodo de pago
+      lv_fp       = st_knvv_s-kvgr4."Forma de pago campos adicionales
+      lv_fp       = st_knvv_s-kvgr4."Forma de pago campos adicionales
+      lv_usocfdi  = st_knvv_s-kVGR1."uSO DE CFDI PROVEEDOR.
+
+    ELSE.
+      lv_metpag   = c_ppd."Meotodo de pago
+      lv_fp        = c_99. "Forma de pago campos adicionales
+    ENDIF.
+
+    CLEAR: lv_ind, lv_glp.
+    READ TABLE gt_cat INTO gw_cat WITH KEY blart = ls_head-tipo_doc.
+    IF sy-subrc EQ 0.
+      CLEAR lv_impeng.
+      CASE gw_cat-t_comprobante.
+*- Factura
+        WHEN 1.
+
+          "<ADD> MAM 01.06.2022 CFDI 4.0
+          aux_string = st_kna1_s-katr6.
+*          lv_metpag   = st_knvv_s-kvgr2."Metodo de Pago campos adicionales
+          aux_string2 = c_i.
+          lv_value    = c_fact.
+*          lv_fp       = st_knvv_s-KVGR4."Forma de pago campos adicionales
+          lv_ind      = 'FC'.
+          lv_impeng   = 'Invoice'.
+*          lv_usocfdi  = gw_cat-uso_cfdi.
+          lv_serie_ad = gw_cat-serie.
+          lv_serie    = gw_cat-serie_sat.
+          IF lv_serie_ad(1) = '5'.         "Gas LP
+            lv_object   = c_ineka.
+            lv_glp      = 'X'.
+          ELSE.
+            lv_object   = c_ineka1.
+          ENDIF.
+*- Nota de crédito
+        WHEN 2.
+          lv_metpag   = c_pue.
+          aux_string2 = c_e.
+          lv_value    = c_nc.
+          lv_serie    = gw_cat-serie.
+          lv_fp       = c_03.
+          lv_ind      = 'NC'.
+          lv_impeng   = 'Credit Note'.
+          lv_serie_ad = gw_cat-serie.
+          lv_serie    = gw_cat-serie_sat.
+          IF lv_serie_ad(1) = '5'.         "Gas LP
+            lv_object   = c_cneka.
+            lv_glp      = 'X'.
+          ELSE.
+            lv_object   = c_cneka1.
+          ENDIF.
+*- Nota de débito
+        WHEN 3.
+          lv_metpag   = c_ppd.
+          aux_string2 = c_i.
+          lv_value    = c_nd.
+          lv_serie    = gw_cat-serie.
+          IF  c_version NE c_4p0.                                                     "<ADD> MAM 01.06.2022 CFDI 4.0
+            lv_fp       = c_02.
+          ELSE.                                                                       "<ADD> MAM 01.06.2022 CFDI 4.0
+            lv_fp       = c_99.                                                       "<ADD> MAM 01.06.2022 CFDI 4.0
+          ENDIF.                                                                      "<ADD> MAM 01.06.2022 CFDI 4.0
+          lv_ind      = 'ND'.
+          lv_impeng   = 'Debit Note'.
+          lv_serie_ad = gw_cat-serie.
+          lv_serie    = gw_cat-serie_sat.
+          IF lv_serie_ad(1) = '5'.         "Gas LP
+            lv_object   = c_dneka.
+            lv_glp      = 'X'.
+          ELSE.
+            lv_object   = c_dneka1.
+          ENDIF.
+      ENDCASE.
+    ELSE.
+      CONCATENATE 'No existe tipo de documento' ls_head-tipo_doc 'en ZFE_CAT_MGS.' INTO e_error SEPARATED BY space.
+      EXIT.
+    ENDIF.
+
+    IF sy-sysid = 'TPP'.
+      r_nr = '01'.
+    ELSE.
+      r_nr = '01'.
+    ENDIF.
+
+    CALL FUNCTION 'NUMBER_GET_NEXT'
+      EXPORTING
+        nr_range_nr             = r_nr
+        object                  = lv_object
+      IMPORTING
+        number                  = lv_number
+      EXCEPTIONS
+        interval_not_found      = 1
+        number_range_not_intern = 2
+        object_not_found        = 3
+        quantity_is_0           = 4
+        quantity_is_not_1       = 5
+        interval_overflow       = 6
+        buffer_overflow         = 7
+        OTHERS                  = 8.
+    IF sy-subrc EQ 0.
+*      lv_number = lv_number + 1.
+    ENDIF.
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_number
+      IMPORTING
+        output = lv_folio.
+
+    CONDENSE: aux_string,
+              aux_string2.
+    lr_comprobante->set_attribute( name  = 'MetodoPago'  value = lv_metpag ).
+
+*<-INICIA Modificacion Migracion CFDI 4.0
+    IF c_version EQ c_4p0.
+      CLEAR aux_string.
+      IF ls_kna1 EQ 'MX'.
+        aux_string = c_01.      " EXPORTACION = 01 No aplica EXPORTACION = 02 Exportacion
+      ELSE.
+        aux_string = c_01.
+      ENDIF.
+      lr_comprobante->set_attribute( name  = 'Exportacion'  value = aux_string ).
+    ENDIF.
+*->FIN Modificacion Migracion CFDI 4.0
+
+    lr_comprobante->set_attribute( name  = 'TipoDeComprobante'  value = aux_string2 ).
+
+    CLEAR: aux_string, aux_string2.
+
+    aux_string = lv_serie.
+    CONDENSE aux_string.
+    lr_comprobante->set_attribute( name  = 'Serie'  value = aux_string ).
+
+    CLEAR aux_string.
+    aux_string = lv_folio.
+    CONDENSE aux_string NO-GAPS.
+    lr_comprobante->set_attribute( name  = 'Folio'  value = aux_string ).
+
+    CLEAR aux_string.
+    aux_string = ls_head-subtotal.
+    CONDENSE aux_string.
+    lr_comprobante->set_attribute( name  = 'SubTotal'  value = aux_string ).
+
+    IF ls_head-descuento IS NOT INITIAL.
+      CLEAR aux_string.
+      MOVE ls_head-descuento TO aux_string.
+      CONDENSE aux_string.
+      lr_comprobante->set_attribute( name  = 'Descuento'  value = aux_string ).
+    ENDIF.
+
+    CLEAR aux_string.
+    MOVE ls_head-total TO aux_string.
+    CONDENSE aux_string.
+    lr_comprobante->set_attribute( name  = 'Total'  value = aux_string ).
+
+    CLEAR aux_string.
+    MOVE ls_head-waers TO aux_string.
+    CONDENSE aux_string.
+    lr_comprobante->set_attribute( name  = 'Moneda'  value = aux_string ).
+
+    CLEAR aux_string.
+    aux_string = lv_fp.
+    CONDENSE aux_string.
+    lr_comprobante->set_attribute( name  = 'FormaPago'  value = aux_string ).
+
+
+*    DATA lv_tipo_cambio TYPE kurs2.                   "<ADD> MAM 01.06.2022 CFDI 4.0
+*    CLEAR lv_tipo_cambio.                             "<ADD> MAM 01.06.2022 CFDI 4.0
+*    SELECT SINGLE kurs2                               "<ADD> MAM 01.06.2022 CFDI 4.0
+*      FROM bkpf                                       "<ADD> MAM 01.06.2022 CFDI 4.0
+*      INTO lv_tipo_cambio                             "<ADD> MAM 01.06.2022 CFDI 4.0
+*      WHERE bukrs EQ ls_head-bukrs AND                "<ADD> MAM 01.06.2022 CFDI 4.0
+*            belnr EQ ls_head-factura AND              "<ADD> MAM 01.06.2022 CFDI 4.0
+*            gjahr  EQ ls_head-gjahr.                  "<ADD> MAM 01.06.2022 CFDI 4.0
+*
+**-> MAM Para mandar tipo de cambio del documento contable
+*    IF  lv_tipo_cambio EQ 0.                         "<ADD> MAM 01.06.2022 CFDI 4.0
+*
+*      CLEAR aux_string.
+*      SELECT SINGLE kurs2
+*        FROM vbkpf
+*       INTO @DATA(v_tipo_cambio)
+*        WHERE bukrs = @ls_head-bukrs
+*          AND belnr = @ls_head-factura.
+*      IF sy-subrc EQ 0 AND v_tipo_cambio > 0.
+*        aux_string = v_tipo_cambio.
+*      ELSE.
+*        IF ls_head-tipo_cambio <= 0.
+*          aux_string = 1.
+*        ELSE.
+*          MOVE ls_head-tipo_cambio TO aux_string.
+*        ENDIF.
+*      ENDIF.
+*    ELSE.                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+*      CLEAR aux_string.                              "<ADD> MAM 01.06.2022 CFDI 4.0
+*      aux_string = lv_tipo_cambio.                   "<ADD> MAM 01.06.2022 CFDI 4.0
+*    ENDIF.                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+*    CLEAR lv_tipo_cambio.                            "<ADD> MAM 01.06.2022 CFDI 4.0
+
+    " Obtiene tipo de cambio
+*    CLEAR aux_string.
+****    SELECT SINGLE kurs2
+****      FROM vbkpf
+****      INTO @DATA(v_tipo_cambio)
+****      WHERE bukrs = @ls_head-bukrs
+****        AND belnr = @ls_head-factura.
+****    IF sy-subrc EQ 0 AND v_tipo_cambio > 0.
+****      aux_string = v_tipo_cambio.
+****    ELSE.
+****      IF ls_head-tipo_cambio <= 0.
+****        aux_string = 1.
+****      ELSE.
+****        MOVE ls_head-tipo_cambio TO aux_string.
+****      ENDIF.
+****    ENDIF.
+
+****    *****GRUIZ
+*    MOVE: ls_head-bldat TO fecha_f.
+*    CONCATENATE fecha_f+6(2) fecha_f+4(2) fecha_f+0(4)
+*    INTO c_input.
+*    CALL FUNCTION 'ZCONVERSION_EXIT_INVDT_INPUT'
+*    EXPORTING
+*      input  = c_input
+*    IMPORTING
+*      output = c_input2.
+*
+*    SELECT SINGLE ukurs INTO v_ukurs
+*   FROM tcurr WHERE
+*                    fcurr EQ c_usd AND
+*                    tcurr EQ c_mxn AND
+*                    gdatu EQ c_input2.
+*
+*    IF v_ukurs = 0.
+*        aux_string = 1.
+*    ELSE.
+*        aux_string = v_ukurs.
+*    ENDIF.
+
+    IF ls_head-waers <> 'MXN'.
+      aux_string = ls_head-tipo_cambio.
+      CONDENSE aux_string.
+      Data GTipoCambio type BAPI1093_0.
+
+      call FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+        EXPORTING
+          rate_type  =  'M'                " Exchange Rate Type
+          from_curr  =  ls_head-waers                " From Currency
+          to_currncy =  'MXN'                " To Currency
+          date       =  ls_head-bldat                " Value Date
+        IMPORTING
+          exch_rate  = GTipoCambio                  " Exchange Rate, Factors for Currency Pair
+*          return     =                  " Error Message
+        .
+        aux_string = GTipoCambio-EXCH_RATE.
+      CONDENSE aux_string.
+
+
+
+      lr_comprobante->set_attribute( name  = 'TipoCambio'  value = aux_string ).
+    ELSE.
+      aux_string = 1.
+      CONDENSE aux_string.
+      lr_comprobante->set_attribute( name  = 'TipoCambio'  value = aux_string ).
+
+    ENDIF.
+**- UUIDs relacionados
+    IF ( ls_head-relac = abap_true AND lv_ind <> 'FC' ).
+*    " Timbrado de factura por cancelación con referencia
+* Begin -- Adolfo LV
+*     OR ( ls_head-relac = abap_true AND ls_head-cancelado = zcfdi_sign_from_cancel_eka_op=>c_tobe_cancelled ). ">COMENATADO MAM EVITAR CODIGO 8
+    lr_fdirelacionados = gr_ld->create_simple_element( name   = 'cfdi:CfdiRelacionados'
+                                                       parent = lr_comprobante  ).
+
+    CLEAR aux_string.
+    CASE lv_ind.
+      WHEN 'NC'.            "Nota de crédito
+        aux_string = '01'.
+      WHEN 'ND'.            "Nota de débito
+        aux_string = '02'.
+      WHEN 'FC'. " Timbrado de factura por cancelación con referencia
+        aux_string = '04'.
+        CLEAR: ls_head-cancelado.
+    ENDCASE.
+
+    CONDENSE aux_string.
+    lr_fdirelacionados->set_attribute( name  = 'TipoRelacion' value = aux_string ).
+
+    lr_fdirelacionado = gr_ld->create_simple_element( name    = 'cfdi:CfdiRelacionado'
+                                                      parent  = lr_fdirelacionados  ).
+    CLEAR aux_string.
+    aux_string = ls_head-uuid_relac.
+    CONDENSE aux_string.
+    lr_fdirelacionado->set_attribute( name  = 'UUID' value = aux_string ).
+  ENDIF.
+
+  IF ls_head-bukrs IS NOT INITIAL.
+    MOVE ls_head-bukrs TO bapi_cco.
+  ENDIF.
+  CALL FUNCTION 'BAPI_COMPANYCODE_GETDETAIL'
+    EXPORTING
+      companycodeid       = bapi_cco
+    IMPORTING
+      companycode_address = bapi_adr.
+  IF sy-subrc NE 0.
+    CONCATENATE 'No hay datos configurados para la sociedad' ls_head-bukrs INTO e_error SEPARATED BY space.
+    EXIT.
+  ELSE.
+    MOVE bapi_adr-postl_cod1 TO aux_string.
+  ENDIF.
+  CONDENSE aux_string.
+  lr_comprobante->set_attribute( name  = 'LugarExpedicion'  value = aux_string ).
+
+  IF c_version EQ c_4p0.                                                   "<ADD> MAM 01.06.2022 CFDI 4.0
+    CLEAR aux_string.                                                      "<ADD> MAM 01.06.2022 CFDI 4.0
+    aux_string = c_4p0.                                                    "<ADD> MAM 01.06.2022 CFDI 4.0
+    CONDENSE aux_string.                                                   "<ADD> MAM 01.06.2022 CFDI 4.0
+    lr_comprobante->set_attribute( name  = 'Version' value = aux_string ). "<ADD> MAM 01.06.2022 CFDI 4.0
+  ELSE.                                                                    "<ADD> MAM 01.06.2022 CFDI 4.0
+    lr_comprobante->set_attribute( name  = 'Version' value = '3.3' ).
+  ENDIF.                                                                   "<ADD> MAM 01.06.2022 CFDI 4.0
+
+  lr_emisor = gr_ld->create_simple_element(
+  name    = 'cfdi:Emisor'
+  parent  = lr_comprobante  ).
+
+  CONCATENATE bapi_adr-name
+              bapi_adr-name_2
+         INTO aux_string.
+  CONDENSE aux_string.
+
+  REPLACE 'Á' WITH 'A' INTO aux_string.
+  REPLACE 'É' WITH 'E' INTO aux_string.
+  REPLACE 'Í' WITH 'I' INTO aux_string.
+  REPLACE 'Ó' WITH 'O' INTO aux_string.
+  REPLACE 'Ú' WITH 'U' INTO aux_string.
+  REPLACE 'á' WITH 'a' INTO aux_string.
+  REPLACE 'é' WITH 'e' INTO aux_string.
+  REPLACE 'í' WITH 'i' INTO aux_string.
+  REPLACE 'ó' WITH 'o' INTO aux_string.
+  REPLACE 'ú' WITH 'u' INTO aux_string.
+
+  IF c_version EQ c_4p0.
+
+
+*    CALL METHOD po_logger->add_message
+*      EXPORTING
+*        iv_msgty = 'I'
+*        iv_msgid = 'ZCFDI_40'
+*        iv_msgno = '101'
+*        iv_msgv1 = 'Programa'
+*        iv_msgv2 = sy-cprog.
+    "<ADD> MAM 01.06.2022 CFDI 4.0
+    CLEAR: aux_string, ls_parametros.                                               "<ADD> MAM 01.06.2022 CFDI 4.0
+    READ TABLE gt_parametros INTO ls_parametros WITH KEY bukrs     = ls_head-bukrs  "<ADD> MAM 01.06.2022 CFDI 4.0
+                                                         programa  = sy-cprog       "<ADD> MAM 01.06.2022 CFDI 4.0
+                                                         parametro = 'EMISOR'       "<ADD> MAM 01.06.2022 CFDI 4.0
+                                                         field     = 'NOMBRE'.      "<ADD> MAM 01.06.2022 CFDI 4.0
+    IF sy-subrc = 0.
+      aux_string = ls_parametros-value.                                               "<ADD> MAM 01.06.2022 CFDI 4.0
+    ELSE.
+      aux_string = 'SNR INFRAESTRUCTURA, MANTENIMIENTO Y SERVICIOS'.                  "<ADD> MAM 01.06.2022 CFDI 4.0
+    ENDIF.
+  ENDIF.                                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+
+  lr_emisor->set_attribute( name  = 'Nombre' value = aux_string ).
+
+  SELECT SINGLE paval FROM t001z
+    INTO aux_string
+    WHERE bukrs EQ ls_head-bukrs
+      AND party EQ 'MX_RFC'.
+    IF sy-subrc <> '0'.
+      e_error = 'Se requiere el RFC del emisor'.
+      EXIT.
+    ENDIF.
+    vemisor =  aux_string.
+    lr_emisor->set_attribute( name  = 'Rfc' value = aux_string ).
+
+    CLEAR aux_string.
+    aux_string = '601'.
+    CONDENSE aux_string.
+    lr_emisor->set_attribute( name  = 'RegimenFiscal' value = aux_string ).
+
+**----------------------------------------------------------------------------------------*
+*Receptor                                                                                 *
+*-----------------------------------------------------------------------------------------*
+** Llenado de datos para el domicilio del receptor
+    lr_receptor = gr_ld->create_simple_element(
+    name    = 'cfdi:Receptor'
+    parent  = lr_comprobante ).
+
+*->Ini      "<ADD> MAM 01.06.2022 CFDI 4.0
+    IF c_version EQ c_4p0.
+      IF ls_head-rfc_receptor IS INITIAL OR ls_head-rfc_receptor(2) = 'XE'.                        "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR aux_string.                                                                          "<ADD> MAM 01.06.2022 CFDI 4.0
+*        aux_string = c_616.  " 616 = Sin Obligaciones Fiscales                                    "<ADD> MAM 01.06.2022 CFDI 4.0
+*        aux_string = c_610.   " 610 = Residentes en el Extranjero sin establecimiento perm Mexico "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR st_kna1_s.                                                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+        READ TABLE lt_kna1_s INTO st_kna1_s WITH KEY kunnr = ls_head-kunnr.                        "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR  aux_string.                                                                         "<ADD> MAM 01.06.2022 CFDI 4.0
+        aux_string = st_kna1_s-katr6.                                                              "<ADD> MAM 01.06.2022 CFDI 4.0
+
+      ELSEIF ls_head-rfc_receptor IS  NOT INITIAL AND ls_head-rfc_receptor(2) NE 'XE'.             "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR st_kna1_s.                                                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+        READ TABLE lt_kna1_s INTO st_kna1_s WITH KEY kunnr = ls_head-kunnr.                        "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR  aux_string.
+        vreceptor =  st_kna1_s-katr6.
+        aux_string = st_kna1_s-katr6.                                                              "<ADD> MAM 01.06.2022 CFDI 4.0
+      ENDIF.                                                                                       "<ADD> MAM 01.06.2022 CFDI 4.0
+      lr_receptor->set_attribute( name  = 'RegimenFiscalReceptor' value = aux_string ).            "<ADD> MAM 01.06.2022 CFDI 4.0
+    ENDIF.                                                                                         "<ADD> MAM 01.06.2022 CFDI 4.0
+
+    IF c_version EQ c_4p0.
+      IF ls_head-rfc_receptor IS INITIAL OR ls_head-rfc_receptor(2) = 'XE'.                         "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR aux_string.                                                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+        aux_string = bapi_adr-postl_cod1.                                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+      ELSEIF ls_head-rfc_receptor IS  NOT INITIAL AND ls_head-rfc_receptor(2) NE 'XE'.              "<ADD> MAM 01.06.2022 CFDI 4.0                                                                        "<ADD> MAM 01.06.2022 CFDI 4.0
+        CLEAR: aux_string,st_kna1_s.                                                                "<ADD> MAM 01.06.2022 CFDI 4.0
+        READ TABLE lt_kna1_s INTO st_kna1_s WITH KEY kunnr = ls_head-kunnr.                         "<ADD> MAM 01.06.2022 CFDI 4.0
+        aux_string = st_kna1_s-pstlz.                                                               "<ADD> MAM 01.06.2022 CFDI 4.0
+      ENDIF.                                                                                        "<ADD> MAM 01.06.2022 CFDI 4.0
+      lr_receptor->set_attribute( name  = 'DomicilioFiscalReceptor' value = aux_string ).           "<ADD> MAM 01.06.2022 CFDI 4.0
+    ENDIF.                                                                                          "<ADD> MAM 01.06.2022 CFDI 4.0
+*<-Fin     "<ADD> MAM 01.06.2022 CFDI 4.0
+
+    CLEAR aux_string.
+*    aux_string = lv_name1.
+    IF c_version NE c_4p0.                                                                         "<ADD> MAM 01.06.2022 CFDI 4.0
+      aux_string = ls_kna1-name1.
+    ELSE.
+      CLEAR aux_string.                                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+      CLEAR st_kna1_s.                                                                             "<ADD> MAM 01.06.2022 CFDI 4.0
+      READ TABLE lt_kna1_s INTO st_kna1_s WITH KEY kunnr = ls_head-kunnr.                          "<ADD> MAM 01.06.2022 CFDI 4.0
+      CONCATENATE st_kna1_s-name1                                                                  "<ADD> MAM 01.06.2022 CFDI 4.0
+                  st_kna1_s-name2                                                                  "<ADD> MAM 01.06.2022 CFDI 4.0
+                  st_kna1_s-name3                                                                  "<ADD> MAM 01.06.2022 CFDI 4.0
+                  st_kna1_s-name4 INTO aux_string SEPARATED BY space.                              "<ADD> MAM 01.06.2022 CFDI 4.0
+
+    ENDIF.
+    lr_receptor->set_attribute( name  = 'Nombre' value = aux_string ).
+
+    CLEAR aux_string.
+    CLEAR lv_ext.                                                                                "<ADD> MAM 01.06.2022 CFDI 4.0
+    IF ls_head-rfc_receptor IS INITIAL OR ls_head-rfc_receptor(2) = 'XE'.
+      ls_head-rfc_receptor = 'XEXX010101000'.
+*->marcar bandera para saber que es un RFC Generico                                               "<ADD> MAM 01.06.2022 CFDI 4.0
+      lv_ext = c_x.                                                                               "<ADD> MAM 01.06.2022 CFDI 4.0
+    ENDIF.
+
+    aux_string = ls_head-rfc_receptor.
+    lr_receptor->set_attribute( name  = 'Rfc' value = aux_string ).
+
+    IF lv_ext IS INITIAL.                                                                         "<ADD> MAM 01.06.2022 CFDI 4.0                                                                         "<ADD> MAM 01.06.2022 CFDI 4.0
+      CASE lv_ind.
+        WHEN 'NC'.            "Nota de Crédito
+          aux_string = 'G01'.
+          lv_usocfdi = 'G01'.
+        WHEN 'ND'.            "Nota de Débito
+          IF c_4p0 IS INITIAL.                                                                      "<ADD> MAM 01.06.2022 CFDI 4.0
+            aux_string = 'P01'.
+            lv_usocfdi = 'P01'.
+          ELSE.
+            aux_string = 'G02'.                                                                      "<ADD> MAM 01.06.2022 CFDI 4.0
+            lv_usocfdi = 'G02'.                                                                      "<ADD> MAM 01.06.2022 CFDI 4.0
+          ENDIF.                                                                                     "<ADD> MAM 01.06.2022 CFDI 4.0
+        WHEN 'FC'.
+
+          IF lv_usocfdi IS NOT INITIAL.
+            aux_string = lv_usocfdi.
+          ELSE.
+            IF ls_head-uso_cfdi IS NOT INITIAL.
+              aux_string = ls_head-uso_cfdi.
+              lv_usocfdi = ls_head-uso_cfdi.
+*            ELSE.
+*              aux_string = 'G03'.
+*              lv_usocfdi = 'G03'.
+            ENDIF.
+          ENDIF.
+      ENDCASE.
+    ELSE.                                                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+      CLEAR aux_string.                                                                              "<ADD> MAM 01.06.2022 CFDI 4.0
+      aux_string = c_s01.   "S01 = Sin efectos Fiscales                                              "<ADD> MAM 01.06.2022 CFDI 4.0
+    ENDIF.                                                                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+    lr_receptor->set_attribute( name  = 'UsoCFDI' value = aux_string ).
+
+    lr_conceptos = gr_ld->create_simple_element( name    = 'cfdi:Conceptos'
+                                                 parent  = lr_comprobante ).
+
+
+***************DETALLE DE LA FACTURA***************
+*- Nota de crédito o débito           "Se solicitó que NC y ND también se enviará la información como si fuera Factura
+*    CASE lv_ind.
+*      WHEN 'NC' OR 'ND'.
+*        READ TABLE t_det_cfdi INTO ls_det WITH KEY bukrs = ls_head-bukrs
+*                                                   belnr = ls_head-belnr
+*                                                   gjahr = ls_head-gjahr.
+*        CLEAR lv_prod_eka.
+*        MOVE ls_det-prod_eka TO lv_prod_eka.
+*        CONDENSE lv_prod_eka.
+*        TRANSLATE lv_prod_eka TO UPPER CASE.
+*
+*        READ TABLE lt_conver INTO lw_conver WITH KEY zmaterial = lv_prod_eka.
+*        IF sy-subrc NE 0.
+*          CONCATENATE 'No se encontró información del material'
+*                      lv_prod_eka
+*                      'en tabla de conversión' INTO e_error SEPARATED BY space.
+*        ENDIF.
+*
+*        lr_concepto = gr_ld->create_simple_element( name    = 'cfdi:Concepto'
+*                                                    parent  = lr_conceptos ).
+*        CLEAR aux_string.
+**        aux_string = '84111506'.
+*        aux_string = lw_conver-clave_sat.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'ClaveProdServ' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = '1'.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'Cantidad' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = lw_conver-zmaterial.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'NoIdentificacion' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = lw_conver-descrip.
+*        lr_concepto->set_attribute( name  = 'Descripcion' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = ls_head-total.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'Importe' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = lw_conver-unidad_sat.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'ClaveUnidad' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = lw_conver-udm.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'Unidad' value = aux_string ).
+*
+*        CLEAR aux_string.
+*        aux_string = ls_head-total.
+*        CONDENSE aux_string.
+*        lr_concepto->set_attribute( name  = 'ValorUnitario' value = aux_string ).
+*
+*        MODIFY zcfdi_det_mgs FROM ls_det.
+*        CLEAR ls_det.
+*- Factura
+*      WHEN OTHERS.
+    CLEAR gv_cant.
+    LOOP AT t_det_cfdi INTO ls_det
+      WHERE bukrs = ls_head-bukrs
+        AND belnr = ls_head-belnr
+        AND gjahr = ls_head-gjahr.
+
+      CLEAR: lv_prod_eka, wa_pos.
+
+      gv_cant = gv_cant + ls_det-cantidad.
+      lv_prod_eka = ls_det-prod_eka.
+
+      CONDENSE lv_prod_eka.
+      TRANSLATE lv_prod_eka TO UPPER CASE.
+
+      READ TABLE lt_conver INTO lw_conver WITH KEY zmaterial = lv_prod_eka.
+      IF sy-subrc EQ 0.
+        lr_concepto = gr_ld->create_simple_element( name    = 'cfdi:Concepto'
+                                                    parent  = lr_conceptos ).
+        CLEAR aux_string.
+        aux_string = lw_conver-clave_sat.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'ClaveProdServ' value = aux_string ).
+
+        CLEAR aux_string.
+        IF ls_det-cantidad <= 0.
+          MOVE '1' TO aux_string.
+        ELSE.
+          aux_string = ls_det-cantidad.
+        ENDIF.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'Cantidad' value = aux_string ).
+        wa_pos-volumen = aux_string.
+
+        CLEAR aux_string.
+        aux_string = lw_conver-clave_sat.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'NoIdentificacion' value = aux_string ).
+
+        CLEAR aux_string.
+        aux_string = lw_conver-descrip.
+        lr_concepto->set_attribute( name  = 'Descripcion' value = aux_string ).
+        wa_pos-desc = aux_string.
+
+        CLEAR aux_string.
+        aux_string = ls_det-dmbtr.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'Importe' value = aux_string ).
+        wa_pos-importe = aux_string.
+
+        CLEAR aux_string.
+        aux_string = lw_conver-unidad_sat.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'ClaveUnidad' value = aux_string ).
+
+        CLEAR aux_string.
+        aux_string = lw_conver-xml_um.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'Unidad' value = aux_string ).
+        wa_pos-unidad = aux_string.
+
+        CLEAR aux_string.
+        aux_string = ls_det-valor_unit.
+        CONDENSE aux_string.
+        lr_concepto->set_attribute( name  = 'ValorUnitario' value = aux_string ).
+        wa_pos-precio = aux_string.
+*********************************************************************************************
+* INICIO Modificacion Migracion CFDI 4.0 MAM 01.06.2022
+*********************************************************************************************
+        IF c_version EQ c_4p0.                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+          IF ls_det-importe_iva > 0.                                                      "<ADD> MAM 01.06.2022 CFDI 4.0
+            CLEAR aux_string.                                                             "<ADD> MAM 01.06.2022 CFDI 4.0
+            aux_string = c_02.                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+          ELSE.                                                                           "<ADD> MAM 01.06.2022 CFDI 4.0
+            aux_string = c_01.                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+          ENDIF.                                                                          "<ADD> MAM 01.06.2022 CFDI 4.0
+          lr_concepto->set_attribute( name = 'ObjetoImp' value = aux_string ).            "<ADD> MAM 01.06.2022 CFDI 4.0
+          CLEAR aux_string.                                                               "<ADD> MAM 01.06.2022 CFDI 4.0
+        ENDIF.                                                                            "<ADD> MAM 01.06.2022 CFDI 4.0
+********************************************************************************************
+* FIN Modificacion Migracion CFDI 4.0 MAM 01.06.2022
+*********************************************************************************************
+
+        IF ls_det-importe_iva > 0.
+          lr_impuestos = gr_ld->create_simple_element( name   = 'cfdi:Impuestos'
+                                                       parent = lr_concepto ).
+
+          lr_traslados = gr_ld->create_simple_element( name   = 'cfdi:Traslados'
+                                                       parent = lr_impuestos ).
+
+          lr_traslado = gr_ld->create_simple_element( name    = 'cfdi:Traslado'
+                                                      parent  = lr_traslados ).
+
+          CLEAR: aux_string.
+*          aux_string = ls_det-importe_iva.
+*          CONDENSE aux_string.
+          DATA vdec4 TYPE p DECIMALS 2.
+          vdec4 = ls_det-importe_iva.
+
+          MOVE vdec4 TO aux_string.
+          CONDENSE aux_string.
+
+          lr_traslado->set_attribute( name  = 'Importe' value = aux_string ).
+
+          CLEAR aux_string.
+          aux_string = '0.160000'.
+          CONDENSE aux_string.
+          lr_traslado->set_attribute( name  = 'TasaOCuota' value = aux_string ).
+
+          CLEAR aux_string.
+          aux_string = 'Tasa'.
+          CONDENSE aux_string.
+          lr_traslado->set_attribute( name  = 'TipoFactor' value = aux_string ).
+
+          CLEAR aux_string.
+*          aux_string = ls_det-dmbtr.
+*          CONDENSE aux_string.
+
+          DATA vdec2 TYPE p DECIMALS 2.
+          vdec2 = ls_det-dmbtr.
+
+          MOVE vdec2 TO aux_string.
+          CONDENSE aux_string.
+
+          lr_traslado->set_attribute( name  = 'Base' value = aux_string ).
+
+          CLEAR aux_string.
+          aux_string = '002'.
+          CONDENSE aux_string.
+          lr_traslado->set_attribute( name  = 'Impuesto' value = aux_string ).
+        ENDIF.
+      ELSE.
+        CONCATENATE 'No se encontró información del material'
+                    lv_prod_eka
+                    'en tabla de conversión' INTO e_error SEPARATED BY space.
+        EXIT.
+      ENDIF.
+      MODIFY zcfdi_det_40 FROM ls_det.
+      CLEAR ls_det.
+
+      wa_pos-moneda = ls_head-waers.
+      APPEND wa_pos TO lt_pos.
+    ENDLOOP.
+*    ENDCASE.
+
+    CLEAR lv_impuesto.
+    lv_impuesto = ls_head-total_iva + ls_head-total_ret.
+
+    IF lv_impuesto > 0.
+      lr_impuestos = gr_ld->create_simple_element( name    = 'cfdi:Impuestos'
+                                                   parent  = lr_comprobante ).
+      IF ls_head-total_ret > 0.
+        CLEAR aux_string.
+        aux_string = ls_head-total_ret.
+        CONDENSE aux_string.
+        lr_impuestos->set_attribute( name  = 'TotalImpuestosRetenidos' value = aux_string ).
+      ENDIF.
+
+      IF ls_head-total_iva > 0.
+        CLEAR aux_string.
+
+        DATA vdec TYPE p DECIMALS 2.
+        vdec = ls_head-total_iva.
+
+        MOVE vdec TO aux_string.
+        CONDENSE aux_string.
+
+
+        lr_impuestos->set_attribute( name  = 'TotalImpuestosTrasladados' value = aux_string ).
+      ENDIF.
+
+      IF ls_head-total_ret > 0.
+        lr_retenciones = gr_ld->create_simple_element(
+        name    = 'cfdi:Retenciones'
+        parent  = lr_impuestos ).
+
+        lr_retencion = gr_ld->create_simple_element(
+        name    = 'cfdi:Retencion'
+        parent  = lr_retenciones ).
+
+*        CLEAR aux_string.
+*        aux_string = ls_head-total_ret.
+        DATA vdec6 TYPE p DECIMALS 2.
+        vdec6 = ls_head-total_ret.
+
+        MOVE vdec6 TO aux_string.
+        CONDENSE aux_string.
+
+
+
+        lr_retencion->set_attribute( name  = 'Importe' value = aux_string ).
+
+        CLEAR aux_string.
+        aux_string = '002'.
+        lr_retencion->set_attribute( name  = 'Impuesto' value = aux_string ).
+
+      ENDIF.
+
+      IF ls_head-total_iva > 0.
+        lr_traslados = gr_ld->create_simple_element(
+        name    = 'cfdi:Traslados'
+        parent  = lr_impuestos ).
+
+        lr_traslado = gr_ld->create_simple_element(
+        name    = 'cfdi:Traslado'
+        parent  = lr_traslados ).
+
+        CLEAR aux_string.
+        MOVE '002' TO aux_string.
+        lr_traslado->set_attribute( name  = 'Impuesto' value = aux_string ).
+
+        CLEAR aux_string.
+        MOVE 'Tasa' TO aux_string.
+        lr_traslado->set_attribute( name  = 'TipoFactor' value = aux_string ).
+
+        CLEAR aux_string.
+        aux_string = '0.160000'.
+        CONDENSE aux_string.
+        lr_traslado->set_attribute( name  = 'TasaOCuota' value = aux_string ).
+
+
+        CLEAR aux_string.
+*        aux_string = ls_head-total_iva.
+*        CONDENSE aux_string.
+        DATA vdec7 TYPE p DECIMALS 2.
+        vdec7 = ls_head-total_iva.
+
+        MOVE vdec7 TO aux_string.
+        CONDENSE aux_string.
+
+        lr_traslado->set_attribute( name  = 'Importe' value = aux_string ).
+
+
+        CLEAR aux_string.
+*        aux_string = ls_det-dmbtr.
+*        CONDENSE aux_string.
+
+        DATA vdec3 TYPE p DECIMALS 2.
+        vdec3 = ls_head-subtotal.
+
+        MOVE vdec3 TO aux_string.
+        CONDENSE aux_string.
+
+        lr_traslado->set_attribute( name  = 'Base' value = aux_string ).
+
+      ENDIF.
+    ENDIF.
+
+*- Si es Gas Natural no solicita addenda
+    CLEAR lv_addenda.
+    lv_addenda = i_addenda.
+
+    IF lv_glp <> 'X'.
+      CLEAR lv_addenda.
+    ENDIF.
+
+*- Agrega addenda a Pemex
+    IF lv_addenda EQ 'X'.
+
+      CLEAR: contrato, surtimiento, acree, gestor, fini, pos_ap, entrada, ejer, gv_add.
+      PERFORM f_get_addenda.
+
+      IF gv_add = 'X'.
+        lr_addenda = gr_ld->create_simple_element( name    = 'cfdi:Addenda'
+                                                   parent  = lr_comprobante  ).
+
+        CLEAR aux_string.
+        lr_addendapemex = gr_ld->create_simple_element( name    = 'pm:Addenda_Pemex'
+                                                        parent  = lr_addenda  ).
+
+        CLEAR aux_string.
+        aux_string = 'http://pemex.com/facturaelectronica/addenda/v2 https://pemex.reachcore.com/schemas/addenda-pemex-v2.xsd'.
+        CONDENSE aux_string.
+        lr_addendapemex->set_attribute( name  = 'xsi:schemaLocation' value = aux_string ).
+
+        CLEAR aux_string.
+        aux_string = 'http://pemex.com/facturaelectronica/addenda/v2'.
+        CONDENSE aux_string.
+        lr_addendapemex->set_attribute( name  = 'xmlns:pm' value = aux_string ).
+
+        CLEAR aux_string.
+        aux_string = 'http://www.w3.org/2001/XMLSchema-instance'.
+        CONDENSE aux_string.
+        lr_addendapemex->set_attribute( name  = 'xmlns:xsi' value = aux_string ).
+
+
+        CLEAR aux_string.
+        aux_string = contrato.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:CONTRATO'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+
+        CLEAR aux_string.
+        aux_string = surtimiento.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:O_SURTIMIENTO'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+
+        CLEAR aux_string.
+        aux_string = acree.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:N_ACREEDOR'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+        CLEAR aux_string.
+        aux_string = gestor.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:C_GESTOR'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+
+        CLEAR aux_string.
+        aux_string = fini.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:FINIQUITO'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+
+        CLEAR aux_string.
+        aux_string = pos_ap.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:POSICIONAP'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+
+        CLEAR aux_string.
+        aux_string = entrada.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:ENTRADA'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+
+        CLEAR aux_string.
+        aux_string = ejer.
+        CONDENSE aux_string NO-GAPS.
+        lr_addendaaux   = gr_ld->create_simple_element( name    = 'pm:EJERCICIO'
+                                                        value   = aux_string
+                                                        parent  = lr_addendapemex  ).
+      ELSE.
+        MESSAGE i398(00) WITH 'No se incluirá addenda, datos incompletos.'.
+      ENDIF.
+    ENDIF.
+
+    lr_sf = lr_ixml->create_stream_factory( ).
+    lr_ostream = lr_sf->create_ostream_itable( table = gt_xmltable ).
+    lr_encoding = lr_ixml->create_encoding( character_set = 'UTF-8'
+                                            byte_order = if_ixml_encoding=>co_none ).
+    ls_success  = lr_ostream->set_encoding( encoding = lr_encoding ).
+    lr_renderer = lr_ixml->create_renderer( ostream  = lr_ostream
+                                            document = gr_ld  ).
+    ls_rc = lr_renderer->render( ).
+    gf_xmlsize = lr_ostream->get_num_written_raw( ).
+
+    CLEAR: va_xml_string.
+
+    CALL FUNCTION 'SCMS_BINARY_TO_STRING'
+      EXPORTING
+        input_length = lv_input
+      IMPORTING
+        text_buffer  = va_xml_string
+      TABLES
+        binary_tab   = gt_xmltable.
+
+    CONDENSE va_xml_string.
+
+***** CUSTOM DATA
+    DATA: lv_fecha    TYPE datum,
+          lv_last_day TYPE datum,
+          lv_dif_dias TYPE i,
+          lt_fest     TYPE TABLE OF ztb_calendar_eua WITH HEADER LINE,
+          v_dia       TYPE scal-indicator.
+
+    CLEAR: gt_xmltable, lv_fecha.
+
+* crear documento
+    lr_ixml = cl_ixml=>create( ).
+    gr_ld  = lr_ixml->create_document( ).
+
+    lr_domicilios = gr_ld->create_simple_element( name    = 'Domicilios'
+                                                  parent  = gr_ld  ).
+
+    lr_emisor = gr_ld->create_simple_element( name    = 'Emisor'
+                                              parent  = lr_domicilios  ).
+
+    CLEAR lv_adrnr.
+    SELECT SINGLE adrnr
+      FROM t001
+      INTO lv_adrnr
+      WHERE bukrs EQ ls_head-bukrs
+        AND land1 EQ 'MX'.
+      IF sy-subrc EQ 0.
+
+        CALL FUNCTION 'ADDR_SELECT_ADRC_SINGLE'
+          EXPORTING
+            addrnumber        = lv_adrnr
+          TABLES
+            et_adrc           = lt_adrc
+          EXCEPTIONS
+            address_not_exist = 1
+            parameter_error   = 2
+            internal_error    = 3
+            OTHERS            = 4.
+
+
+      ENDIF.
+
+      READ TABLE lt_adrc INTO ls_adrc INDEX 1.
+
+
+      CLEAR aux_string.
+*    aux_string = ls_adrc-street.
+* JCD - 09-09-2022 - Cambio de domicilio fiscal MGS
+*    aux_string = 'Lago Zurich'.
+      aux_string = 'Laguna de Mayran'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'Calle'  value = aux_string ).
+
+      CLEAR aux_string.
+*    aux_string = ls_adrc-house_num1.
+*    aux_string = '245'.
+      aux_string = '410'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'NumeroExterior'  value = aux_string ).
+
+      CLEAR aux_string.
+*    aux_string = ls_adrc-house_num2.
+*    aux_string = 'Piso 7'.
+      aux_string = 'Piso 2'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'numeroIntr'  value = aux_string ).
+
+      CLEAR aux_string.
+*    aux_string = ls_adrc-str_suppl3.
+*    aux_string = 'Ampliación Granada'.
+      aux_string = 'Anáhuac I Sección'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'colonia'  value = aux_string ).
+
+      CLEAR aux_string.
+*    aux_string = ls_adrc-mc_city1.
+      aux_string = 'Miguel Hidalgo'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'municipio'  value = aux_string ).
+
+* STATE/REGION
+      CLEAR aux_string.
+*    SELECT SINGLE bezei
+*      FROM t005u
+*      INTO aux_string
+*     WHERE spras = sy-langu
+*       AND bland = ls_adrc-region
+*       AND land1 = ls_adrc-country.
+      aux_string = 'Ciudad de México, CDMX'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'estado'  value = aux_string ).
+
+* COUNTRY
+      CLEAR aux_string.
+*    SELECT SINGLE landx
+*      FROM t005t
+*      INTO aux_string
+*     WHERE spras = sy-langu
+*       AND land1 = ls_adrc-country.
+      aux_string = 'México'.
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'pais'  value = aux_string ).
+
+      CLEAR aux_string.
+*    aux_string = ls_adrc-post_code1.
+*    aux_string = '11529'.
+      aux_string = '11320'.
+* JCD - 09-09-2022 - Cambio de domicilio fiscal MGS
+      CONDENSE aux_string.
+      lr_emisor->set_attribute( name  = 'CP'  value = aux_string ).
+
+
+
+      lr_receptor = gr_ld->create_simple_element(
+                                         name    = 'Receptor'
+                                         parent  = lr_domicilios  ).
+
+*    SELECT SINGLE zterm            "Se solicita se tome del documento contable - vhzd - 16.06.2021
+*      FROM knb1
+*      INTO lv_zterm
+*      WHERE kunnr EQ ls_head-kunnr.
+      CLEAR lv_zterm.
+      SELECT SINGLE zterm
+        FROM bseg
+        INTO lv_zterm
+        WHERE bukrs = ls_head-bukrs
+          AND belnr = ls_head-factura
+          AND gjahr = ls_head-gjahr
+          AND koart = 'D'.
+        IF sy-subrc NE 0.               "Si no lo encuentra, lo toma del dato maestro
+          SELECT SINGLE zterm
+            FROM knb1
+            INTO lv_zterm
+            WHERE kunnr EQ ls_head-kunnr.
+          ENDIF.
+
+          IF lv_zterm IS NOT INITIAL.
+            SELECT SINGLE ztag1
+              FROM t052
+              INTO lv_ztag1
+              WHERE zterm EQ lv_zterm.
+
+              SELECT SINGLE vtext
+                FROM tvzbt
+                INTO lv_vtext
+                WHERE zterm EQ lv_zterm AND
+                      spras EQ sy-langu.
+              ENDIF.
+
+              REFRESH lt_adrc.
+
+              CALL FUNCTION 'ADDR_SELECT_ADRC_SINGLE'
+                EXPORTING
+                  addrnumber        = lv_adrnr_aux
+                TABLES
+                  et_adrc           = lt_adrc
+                EXCEPTIONS
+                  address_not_exist = 1
+                  parameter_error   = 2
+                  internal_error    = 3
+                  OTHERS            = 4.
+
+
+              READ TABLE lt_adrc INTO ls_adrc INDEX 1.
+
+              CLEAR aux_string.
+              aux_string =  ls_adrc-street.
+              CONDENSE aux_string.
+              lr_receptor->set_attribute( name  = 'Calle'  value = aux_string ).
+
+              CLEAR aux_string.
+              aux_string = ls_adrc-house_num1.
+              CONDENSE aux_string.
+              lr_receptor->set_attribute( name  = 'NumeroExterior'  value = aux_string ).
+
+              CLEAR aux_string.
+              aux_string = ls_adrc-house_num2.
+              CONDENSE aux_string.
+              lr_receptor->set_attribute( name  = 'numIntr'  value = aux_string ).
+
+              CLEAR aux_string.
+              aux_string = ls_adrc-city2.
+              CONDENSE aux_string.
+              lr_receptor->set_attribute( name  = 'colonia'  value = aux_string ).
+
+              CLEAR aux_string.
+              aux_string = ls_adrc-city1.
+              CONDENSE aux_string.
+              lr_receptor->set_attribute( name  = 'municipio'  value = aux_string ).
+
+* state/region
+              CLEAR aux_string.
+              SELECT SINGLE bezei FROM  t005u
+                      INTO  aux_string
+                       WHERE spras = sy-langu
+                       AND bland = ls_adrc-region
+                       AND land1 = ls_adrc-country.
+                CONDENSE aux_string.
+                lr_receptor->set_attribute( name  = 'estado'  value = aux_string ).
+
+* COUNTRY
+                CLEAR aux_string.
+                SELECT SINGLE landx FROM  t005t
+                        INTO  aux_string
+                         WHERE spras = sy-langu
+                         AND land1 = ls_adrc-country.
+                  CONDENSE aux_string.
+                  lr_receptor->set_attribute( name  = 'pais'  value = aux_string ).
+
+                  CLEAR aux_string.
+                  aux_string = ls_adrc-post_code1.
+                  CONDENSE aux_string.
+                  lr_receptor->set_attribute( name  = 'CP'  value = aux_string ).
+
+
+
+                  lr_sf = lr_ixml->create_stream_factory( ).
+                  lr_ostream = lr_sf->create_ostream_itable( table = gt_xmltable ).
+                  lr_encoding = lr_ixml->create_encoding(
+                     character_set = 'UTF-8'
+                     byte_order = if_ixml_encoding=>co_none ).
+                  ls_success  = lr_ostream->set_encoding( encoding = lr_encoding ).
+                  lr_renderer = lr_ixml->create_renderer( ostream  = lr_ostream
+                                                          document = gr_ld  ).
+                  ls_rc = lr_renderer->render( ).
+                  gf_xmlsize = lr_ostream->get_num_written_raw( ).
+
+
+
+                  CALL FUNCTION 'SCMS_BINARY_TO_STRING'
+                    EXPORTING
+                      input_length = lv_input
+                    IMPORTING
+                      text_buffer  = va_dom_string
+                    TABLES
+                      binary_tab   = gt_xmltable.
+
+                  CLEAR: gt_xmltable.
+
+*- Pantalla para observaciones
+                  CLEAR lv_observaciones.
+*    PERFORM f_get_observ  USING ls_head-bukrs
+*                                ls_head-factura
+*                                ls_head-gjahr
+*                       CHANGING lv_observaciones.
+
+***
+***
+***
+**** crear documento
+***    lr_ixml = cl_ixml=>create( ).
+***    gr_ld  = lr_ixml->create_document( ).
+***
+***    lr_datosdeimpresion = gr_ld->create_simple_element( name    = 'DatosDeImpresion'
+***                                                        parent  = gr_ld ).
+***
+****- Obtiene No de Orden, Destino, Lugar de Carga y Fecha de Carga
+***
+***    IF lv_glp EQ 'X'.   "Solo envía el pop up cuando es Gas LP
+***      PERFORM f_get_adicionales USING ls_head-bukrs
+***                                      ls_head-factura
+***                                      ls_head-gjahr.
+***    ELSE.
+***      CLEAR: p_noorden, p_destino, p_lugarcarga, p_fcarga.
+***    ENDIF.
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'NoOrden'
+***                                              parent  = lr_datosdeimpresion  ).
+***
+***    CLEAR aux_string.
+***    aux_string = p_noorden.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'numero'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Factura'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+***    aux_string = lv_impeng.
+***    lr_datos1->set_attribute( name  = 'TipoEng'  value = aux_string ).
+***
+***    CLEAR aux_string.
+***    IF lv_glp = 'X'.
+***      CONCATENATE lv_serie_ad lv_folio INTO aux_string.
+***    ELSE.
+***      CONCATENATE lv_serie lv_folio INTO aux_string.
+***    ENDIF.
+***    lr_datos1->set_attribute( name  = 'numero'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'FechaVencimiento'
+***                                              parent  = lr_datosdeimpresion  ).
+****- Recupera los días festivos de EUA
+***    REFRESH lt_fest.
+***    SELECT *
+***      FROM ztb_calendar_eua
+***      INTO CORRESPONDING FIELDS OF TABLE lt_fest.
+***
+***    CLEAR: aux_string, lt_fest.
+***    IF gw_cat-t_comprobante EQ 1 OR gw_cat-t_comprobante EQ 3.
+***      IF lv_zterm = 'MGI1'.
+***        lv_fecha = sy-datum.
+***        lv_fecha+6(2) = 25.
+***
+***        DO.
+***          READ TABLE lt_fest WITH KEY fec_fest = lv_fecha.
+***          IF sy-subrc EQ 0.
+***            lv_fecha = lv_fecha + 1.
+***          ELSE.
+****- Valida fecha, si es fin de semana coloca fecha del siguiente lunes
+***            CALL FUNCTION 'DATE_COMPUTE_DAY'
+***              EXPORTING
+***                date = lv_fecha  "Fecha
+***              IMPORTING
+***                day  = v_dia.
+***
+***            IF v_dia EQ 6.
+***              lv_fecha = lv_fecha + 2.
+***            ELSEIF v_dia EQ 7.
+***              lv_fecha = lv_fecha + 1.
+***            ELSE.
+***              EXIT.
+***            ENDIF.
+***          ENDIF.
+****- Valida fecha, si es fin de semana coloca fecha del siguiente lunes
+***          CALL FUNCTION 'DATE_COMPUTE_DAY'
+***            EXPORTING
+***              date = lv_fecha  "Fecha
+***            IMPORTING
+***              day  = v_dia.
+***
+***          IF v_dia EQ 6.
+***            lv_fecha = lv_fecha + 2.
+***          ELSEIF v_dia EQ 7.
+***            lv_fecha = lv_fecha + 1.
+***          ENDIF.
+***        ENDDO.
+***
+***        CONCATENATE lv_fecha+6(2) lv_fecha+4(2) lv_fecha(4) INTO aux_string SEPARATED BY '/'.
+***
+***      ELSEIF lv_zterm = 'MGI2' OR lv_zterm = 'Z030'.
+***        CLEAR: lv_fecha, lv_last_day, lv_dif_dias.
+***
+***        lv_fecha = sy-datum.
+***
+****- Obtiene el último día del mes
+***        CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+***          EXPORTING
+***            day_in            = lv_fecha
+***          IMPORTING
+***            last_day_of_month = lv_last_day
+***          EXCEPTIONS
+***            day_in_no_date    = 1
+***            OTHERS            = 2.
+***        "Si tiene 30 o más días, coloca 30 en la fecha base
+***        IF lv_last_day+6(2) GE 30.
+***          lv_fecha+6(2) = 30.
+***        ELSE.
+***          lv_fecha = lv_last_day.
+***        ENDIF.
+***
+****- Valida si la fecha es fin de semana o día feria en EUA
+***        DO.
+***          READ TABLE lt_fest WITH KEY fec_fest = lv_fecha.
+***          IF sy-subrc EQ 0.
+***            lv_fecha = lv_fecha + 1.
+***          ELSE.
+****- Valida fecha, si es fin de semana coloca fecha del siguiente lunes
+***            CALL FUNCTION 'DATE_COMPUTE_DAY'
+***              EXPORTING
+***                date = lv_fecha  "Fecha
+***              IMPORTING
+***                day  = v_dia.
+***
+***            IF v_dia EQ 6.
+***              lv_fecha = lv_fecha + 2.
+***            ELSEIF v_dia EQ 7.
+***              lv_fecha = lv_fecha + 1.
+***            ELSE.
+***              EXIT.
+***            ENDIF.
+***          ENDIF.
+****- Valida fecha, si es fin de semana coloca fecha del siguiente lunes
+***          CALL FUNCTION 'DATE_COMPUTE_DAY'
+***            EXPORTING
+***              date = lv_fecha  "Fecha
+***            IMPORTING
+***              day  = v_dia.
+***
+***          IF v_dia EQ 6.
+***            lv_fecha = lv_fecha + 2.
+***          ELSEIF v_dia EQ 7.
+***            lv_fecha = lv_fecha + 1.
+***          ENDIF.
+***        ENDDO.
+***
+***        CONCATENATE lv_fecha+6(2) lv_fecha+4(2) lv_fecha(4) INTO aux_string SEPARATED BY '/'.
+***
+***      ELSEIF lv_zterm = 'CX10'.
+****- Condición de pago PEMEX
+***        lv_fecha = sy-datum + 10.
+***        CONCATENATE lv_fecha+6(2) lv_fecha+4(2) lv_fecha(4) INTO aux_string SEPARATED BY '/'.
+***
+***      ELSEIF lv_zterm = '0001'.
+****- Condición de pago inmediato
+***        lv_fecha = sy-datum.
+***        CONCATENATE lv_fecha+6(2) lv_fecha+4(2) lv_fecha(4) INTO aux_string SEPARATED BY '/'.
+***
+***      ELSE.
+***        IF lv_glp = 'X'.
+***          lv_fecha = sy-datum + 10.
+***          CONCATENATE lv_fecha+6(2) lv_fecha+4(2) lv_fecha(4) INTO aux_string SEPARATED BY '/'.
+***        ELSE.
+***          " Valida último día del mes
+***          CALL FUNCTION 'RP_LAST_DAY_OF_MONTHS'
+***            EXPORTING
+***              day_in            = sy-datum
+***            IMPORTING
+***              last_day_of_month = v_last_day
+***            EXCEPTIONS
+***              day_in_no_date    = 1
+***              OTHERS            = 2.
+***          IF sy-subrc <> 0.
+**** Implement suitable error handling here
+***          ENDIF.
+***
+***          CLEAR lv_last_day.
+***          lv_last_day = sy-datum.
+***          lv_last_day+6(2) = COND #(  WHEN v_last_day+6(2) GE 30 THEN 30
+***                                      ELSE v_last_day+6(2) ).
+***
+***          CONCATENATE lv_last_day+6(2) lv_last_day+4(2) lv_last_day(4) INTO aux_string SEPARATED BY '/'.
+***        ENDIF.
+***      ENDIF.
+***    ENDIF.
+***
+***    CONDENSE aux_string NO-GAPS.
+***    lr_datos1->set_attribute( name  = 'fecha'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Destino'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+***    aux_string = p_destino.
+***    lr_datos1->set_attribute( name  = 'nombre'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'FechaCarga'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+***    IF lv_glp EQ 'X' AND p_fcarga(2) NE '00'.
+***      CONCATENATE p_fcarga+6(2) p_fcarga+4(2) p_fcarga(4) INTO aux_string SEPARATED BY '/'.
+***    ELSE.
+***      CLEAR aux_string.
+***    ENDIF.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'fecha'  value = aux_string ).
+***
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'CondicionesEntrega'
+***                                              parent  = lr_datosdeimpresion  ).
+***
+***    CLEAR aux_string.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'texto'  value = aux_string ).
+***
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'CargaDescarga'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+***    aux_string = p_lugarcarga.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'texto'  value = aux_string ).
+***
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'CondicionesPago'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+***    IF gw_cat-t_comprobante EQ 1 OR gw_cat-t_comprobante EQ 3.
+***      IF lv_zterm = 'MGI1'.
+***        aux_string = 'Dentro de los 25 dias'.
+***      ELSEIF lv_zterm = 'MGI2' OR lv_zterm = 'Z030'.
+***        aux_string = 'Dentro de los 30 dias'.
+***      ELSEIF lv_zterm = 'CX10'.
+***        aux_string = '10 dias emisión factura'.
+***      ELSEIF lv_zterm = '0001'.
+***        aux_string = 'Inmediato/ Immediate'.
+***      ELSE.
+***        CLEAR lv_vtext.
+***
+***        CONCATENATE lv_ztag1 'dias' INTO lv_vtext SEPARATED BY space.
+***        SHIFT lv_vtext LEFT DELETING LEADING '0'.
+***        aux_string = lv_vtext.
+***      ENDIF.
+***    ENDIF.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'texto'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element(
+***                                     name    = 'Remision'
+***                                     parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+****  aux_string = lv_remision.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'numero'  value = aux_string ).
+***
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Permiso'
+***                                              parent  = lr_datosdeimpresion  ).
+***
+***    CLEAR aux_string.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'texto'  value = aux_string ).
+***
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'CO'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+***    IF lv_glp = 'X'.
+***      CONCATENATE lv_serie lv_folio INTO aux_string SEPARATED BY space.
+***    ELSE.
+***      CONCATENATE lv_serie_ad lv_folio INTO aux_string SEPARATED BY space.
+***    ENDIF.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'numero'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'NumeroFinanzas'
+***                                              parent  = lr_datosdeimpresion  ).
+***
+***    CLEAR aux_string.
+***    aux_string = ls_head-factura.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'numero'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Entrega'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+****  aux_string = st_vbrp-vgbel.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'numero'  value = aux_string ).
+***
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Volumen'
+***                                              parent  = lr_datosdeimpresion  ).
+***    IF gv_cant <= 0.
+***      gv_cant = 1.
+***    ENDIF.
+***    CLEAR aux_string.
+****    aux_string = gv_cant.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'valor'  value = aux_string ).
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Unidad'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+****    aux_string = lw_conver-udm.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'valor'  value = aux_string ).
+***
+****- Datos Bancarios
+***    lr_datos1 = gr_ld->create_simple_element( name = 'infoBancaria'
+***                                              parent  = lr_datosdeimpresion  ).
+***
+***    IF lv_glp = 'X'.        "Gas LP
+***      CLEAR aux_string.
+***      aux_string = 'J.P. Morgan Chase Bank, N.A'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'banco'  value = aux_string ).
+***
+***      CLEAR aux_string.
+***      aux_string = '581930745'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'cuenta'  value = aux_string ).
+***
+***      CLEAR aux_string.
+***      aux_string = 'ABA No. 021000021'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'sucursal'  value = aux_string ).
+***
+***      CLEAR aux_string.
+***      aux_string = 'New York'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'ciudad'  value = aux_string ).
+***    ELSE.
+***      CLEAR aux_string.
+***      aux_string = 'J.P. Morgan Chase Bank, N.A'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'banco'  value = aux_string ).
+***
+***      CLEAR aux_string.
+***      aux_string = '581926271'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'cuenta'  value = aux_string ).
+***
+***      CLEAR aux_string.
+***      aux_string = 'ABA No. 021000021'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'sucursal'  value = aux_string ).
+***
+***      CLEAR aux_string.
+***      aux_string = 'New York'.
+***      CONDENSE aux_string.
+***      lr_datos1->set_attribute( name  = 'ciudad'  value = aux_string ).
+***    ENDIF.
+***
+***    lr_datos1 = gr_ld->create_simple_element( name    = 'Descuento'
+***                                              parent  = lr_datosdeimpresion  ).
+***    CLEAR aux_string.
+****  aux_string = lv_descto.
+***    CONDENSE aux_string.
+***    lr_datos1->set_attribute( name  = 'valor'  value = aux_string ).
+
+********************************************************************** Conceptos PDF
+                  lr_datos1 = gr_ld->create_simple_element( name    = 'Conceptos'
+                                                            parent  = lr_datosdeimpresion  ).
+
+                  LOOP AT lt_pos INTO wa_pos.
+                    lr_conc_pdf = gr_ld->create_simple_element( name    = 'Concepto'
+                                                                parent  = lr_datos1  ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-entrega.
+                    lr_conc_pdf->set_attribute( name  = 'entrega'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-volumen.
+                    lr_conc_pdf->set_attribute( name  = 'volumen'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-unidad.
+                    lr_conc_pdf->set_attribute( name  = 'Unidad'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-idtrans.
+                    lr_conc_pdf->set_attribute( name  = 'IdTransporte'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-desc.
+                    lr_conc_pdf->set_attribute( name  = 'Descripcion'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-precio.
+                    lr_conc_pdf->set_attribute( name  = 'Precio'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-importe.
+                    lr_conc_pdf->set_attribute( name  = 'Importe'  value = aux_string ).
+
+                    CLEAR aux_string.
+                    aux_string = wa_pos-moneda.
+                    lr_conc_pdf->set_attribute( name  = 'Moneda'  value = aux_string ).
+                  ENDLOOP.
+
+                  lr_datos1 = gr_ld->create_simple_element( name    = 'ImporteLetra'
+                                                            parent  = lr_datosdeimpresion  ).
+                  CLEAR aux_string.
+                  "valor recupera para QR.
+
+                  ptotal =  ls_head-total.
+                  WRITE ls_head-total TO ptotal LEFT-JUSTIFIED.
+
+                  PERFORM f_importe_letra USING ls_head-total
+                                                ls_head-waers
+                                       CHANGING aux_string.
+                  CONDENSE aux_string.
+                  lr_datos1->set_attribute( name  = 'valor'  value = aux_string ).
+
+
+                  lr_datos1 = gr_ld->create_simple_element( name    = 'Factura'
+                                                            parent  = lr_datosdeimpresion  ).
+                  CLEAR aux_string.
+                  IF ls_head-factura IS NOT INITIAL.
+                    aux_string = ls_head-factura.
+                  ELSE.
+                    aux_string = lv_folio.
+                  ENDIF.
+
+                  lr_datos1 = gr_ld->create_simple_element( name    = 'Observaciones'
+                                                            parent  = lr_datosdeimpresion  ).
+                  CLEAR aux_string.
+                  aux_string = lv_observaciones.
+                  CONDENSE aux_string.
+                  lr_datos1->set_attribute( name  = 'texto'  value = aux_string ).
+
+                  lr_sf = lr_ixml->create_stream_factory( ).
+                  lr_ostream = lr_sf->create_ostream_itable( table = gt_xmltable ).
+                  lr_encoding = lr_ixml->create_encoding(
+                     character_set = 'UTF-8'
+                     byte_order = if_ixml_encoding=>co_none ).
+                  ls_success  = lr_ostream->set_encoding( encoding = lr_encoding ).
+                  lr_renderer = lr_ixml->create_renderer( ostream  = lr_ostream
+                                                          document = gr_ld  ).
+                  ls_rc = lr_renderer->render( ).
+                  gf_xmlsize = lr_ostream->get_num_written_raw( ).
+
+
+
+                  CALL FUNCTION 'SCMS_BINARY_TO_STRING'
+                    EXPORTING
+                      input_length = lv_input
+                    IMPORTING
+                      text_buffer  = va_dat_string
+                    TABLES
+                      binary_tab   = gt_xmltable.
+
+
+                  CLEAR: lv_zterm, lv_vtext, lv_cond, lv_est,
+                         lv_dato1, lv_dato2, lv_dato3, lv_dato4,
+                         lv_dato5, lv_observaciones, lv_vbtyp.
+
+*************** FIN CUSTOM DATA
+****************************************************************************
+**    INICIA Modificacion Migracion CFDI 4.0 – MAM 01.06.2022
+*************************************************************************
+                  DATA i_xml TYPE string.
+                  CLEAR: ls_parametros,i_xml.
+                  i_xml = va_xml_string.
+                  READ TABLE gt_parametros INTO ls_parametros WITH KEY bukrs    = ls_head-bukrs
+*                                                         programa = sy-cprog
+                                                                       field = c_pathxml.
+                  IF sy-subrc EQ 0 AND ls_parametros-value IS NOT INITIAL.
+                    v_ruta = ls_parametros-value.
+                    PERFORM descargar_xml_test USING ls_head i_xml ls_parametros.
+                  ENDIF.
+****************************************************************************
+**    FIN Modificacion Migracion CFDI 4.0 – MAM 01.06.2022
+*************************************************************************
+
+                  CLEAR lv_apikey.
+                  "Nueva tabla ZFE_APIKEY_ALL
+                  SELECT SINGLE apikey
+                    FROM zfe_apikey_all
+                    INTO lv_apikey
+                    WHERE bukrs = ls_head-bukrs.
+                    IF sy-subrc NE 0.
+                      CONCATENATE TEXT-007 ls_head-bukrs INTO e_error SEPARATED BY space.
+                      EXIT.
+                    ENDIF.
+
+                    IF sy-sysid EQ 'TPP'. "Sistema productivo
+                      DATA: it_properties_p TYPE TABLE OF zpro_transaction_property,
+                            st_properties_p TYPE zpro_transaction_property.
+
+                      CLEAR: lv_adrnr, ti_adr6_2, ti_adrt, ti_adr6.
+**Correos
+*      SELECT SINGLE adrnr
+*          FROM kna1
+*          INTO lv_adrnr
+*          WHERE kunnr EQ ls_head-kunnr.
+
+                      SELECT addrnumber
+                             consnumber
+                             smtp_addr
+                      FROM adr6
+                      INTO TABLE ti_adr6_2
+                      WHERE addrnumber EQ ls_kna1-adrnr.
+
+                        SELECT addrnumber
+                               consnumber
+                               remark
+                          FROM adrt
+                          INTO TABLE ti_adrt
+*        WHERE addrnumber EQ lv_adrnr AND
+                          WHERE addrnumber EQ ls_kna1-adrnr AND
+                                langu EQ sy-langu.
+
+                          DELETE ti_adrt WHERE remark IS INITIAL.
+
+                          lv_remark = lv_estacion.
+                          IF ti_adrt IS NOT INITIAL.
+                            LOOP AT ti_adr6_2 INTO st_adr6_2.
+                              READ TABLE ti_adrt INTO st_adrt
+                              WITH KEY addrnumber = st_adr6_2-addrnumber
+                                       consnumber = st_adr6_2-consnumber
+                                       remark = lv_remark.
+                              IF sy-subrc EQ 0.
+                                st_adr6-smtp_addr = st_adr6_2-smtp_addr.
+                                APPEND st_adr6 TO ti_adr6.
+                              ENDIF.
+                            ENDLOOP.
+                          ELSE.
+                            LOOP AT ti_adr6_2 INTO st_adr6_2.
+                              st_adr6-smtp_addr = st_adr6_2-smtp_addr.
+                              APPEND st_adr6 TO ti_adr6.
+                            ENDLOOP.
+                          ENDIF.
+
+                          st_input_p-comprobante = va_xml_string.
+                          st_input_p-domicilios = va_dom_string.
+                          st_input_p-custom_data = va_dat_string.
+
+
+                          TRY.
+                              CREATE OBJECT ws_timbrarpro
+                                EXPORTING
+                                  logical_port_name = 'ZPRO_CO_IEMISION_PORT'.
+
+*GET ws_header protocol
+                              ws_header ?= ws_timbrarpro->get_protocol('IF_WSPROTOCOL_WS_HEADER').
+*additional header:
+                              CONCATENATE
+                                          '<soapenv:Header>'
+                                          '<cus:ApiKey  xmlns:cus="http://www.reachcore.com/CFDI/customHeaders">'
+*                      '5tvxwkbcyaxhsfr6jyhzpydskrm6ntwawnxgavxe5ztfakp7dj6v8hntimctz74nxq5rprwtvsxd6mex' "Api Key MGS
+                                          lv_apikey
+                                          '</cus:ApiKey>'
+                                          '</soapenv:Header>'
+                           INTO l_string.
+*convert to xstring
+                              l_xstring = cl_proxy_service=>cstring2xstring( l_string ).
+                              IF NOT l_string IS INITIAL.
+*create iXML DOM document from XML xstring
+                                CALL FUNCTION 'SDIXML_XML_TO_DOM'
+                                  EXPORTING
+                                    xml           = l_xstring
+                                  IMPORTING
+                                    document      = xml_document
+                                  EXCEPTIONS
+                                    invalid_input = 1
+                                    OTHERS        = 2.
+                                IF sy-subrc = 0 AND NOT xml_document IS INITIAL.
+                                  xml_root = xml_document->get_root_element( ).
+                                  xml_element ?= xml_root->get_first_child( ).
+*add header element by element to SOAP header
+                                  WHILE NOT xml_element IS INITIAL.
+                                    name = xml_element->get_name( ).
+                                    namespace = xml_element->get_namespace_uri( ).
+                                    IF NOT xml_element IS INITIAL.
+                                    ENDIF.
+                                    ws_header->set_request_header(
+                                                name = name
+                                                namespace = namespace
+                                                dom = xml_element ).
+                                    xml_element ?= xml_element->get_next( ).
+                                  ENDWHILE.
+                                ENDIF.
+                              ENDIF.
+
+
+                              CALL METHOD ws_timbrarpro->emitir_comprobante
+                                EXPORTING
+                                  emitir_comprobante_request  = st_input_p
+                                IMPORTING
+                                  emitir_comprobante_response = ls_output.
+                            CATCH cx_ai_system_fault INTO lcl_cx_root.
+                              msg_error = lcl_cx_root->get_text( ).
+                            CATCH cx_ai_application_fault INTO lcl_cx_root.
+                              msg_error = lcl_cx_root->get_text( ).
+                          ENDTRY.
+
+                          "cuando no es ambiente productivo.
+                        ELSE.
+
+                          DATA: it_properties_t TYPE TABLE OF ztest_transaction_property,
+                                st_properties_t TYPE ztest_transaction_property.
+
+                          st_input_t-comprobante = va_xml_string.
+                          st_input_t-domicilios = va_dom_string.
+                          st_input_t-custom_data = va_dat_string.
+
+                          st_properties_t-key = 'TipoCFD'.
+                          st_properties_t-value = lv_value. "'Factura'.
+                          APPEND st_properties_t TO it_properties_t.
+                          st_input_t-transaction_properties-transaction_property = it_properties_t.
+
+
+                          TRY.
+                              CREATE OBJECT ws_timbrardes
+                                EXPORTING
+                                  logical_port_name = 'ZTEST_CO_IEMISION_PORT'.
+
+                              ws_header ?= ws_timbrardes->get_protocol('IF_WSPROTOCOL_WS_HEADER').
+
+*additional header:
+                              CONCATENATE
+                                          '<soapenv:Header>'
+                                          '<cus:ApiKey  xmlns:cus="http://www.reachcore.com/CFDI/customHeaders">'
+*                      '5tvxwkbcyaxhsfr6jyhzpydskrm6ntwawnxgavxe5ztfakp7dj6v8hntimctz74nxq5rprwtvsxd6mex'   "Api Key MGS
+                                          lv_apikey
+                                          '</cus:ApiKey>'
+                                          '</soapenv:Header>'
+                           INTO l_string.
+*convert to xstring
+                              l_xstring = cl_proxy_service=>cstring2xstring( l_string ).
+                              IF NOT l_string IS INITIAL.
+*create iXML DOM document from XML xstring
+                                CALL FUNCTION 'SDIXML_XML_TO_DOM'
+                                  EXPORTING
+                                    xml           = l_xstring
+                                  IMPORTING
+                                    document      = xml_document
+                                  EXCEPTIONS
+                                    invalid_input = 1
+                                    OTHERS        = 2.
+                                IF sy-subrc = 0 AND NOT xml_document IS INITIAL.
+                                  xml_root = xml_document->get_root_element( ).
+                                  xml_element ?= xml_root->get_first_child( ).
+*add header element by element to SOAP header
+                                  WHILE NOT xml_element IS INITIAL.
+                                    name = xml_element->get_name( ).
+                                    namespace = xml_element->get_namespace_uri( ).
+                                    IF NOT xml_element IS INITIAL.
+                                    ENDIF.
+                                    ws_header->set_request_header(
+                                                name = name
+                                                namespace = namespace
+                                                dom = xml_element ).
+                                    xml_element ?= xml_element->get_next( ).
+                                  ENDWHILE.
+                                ENDIF.
+                              ENDIF.
+
+
+                              CALL METHOD ws_timbrardes->emitir_comprobante
+                                EXPORTING
+                                  emitir_comprobante_request  = st_input_t
+                                IMPORTING
+                                  emitir_comprobante_response = st_output_t.
+                            CATCH cx_ai_system_fault INTO lcl_cx_root.
+                              msg_error = lcl_cx_root->get_text( ).
+                            CATCH cx_ai_application_fault INTO lcl_cx_root.
+                              msg_error = lcl_cx_root->get_text( ).
+                          ENDTRY.
+
+                          ls_output-error-inner_errors = st_output_t-error-inner_errors.
+                          ls_output-result = st_output_t-result.
+                          MOVE st_output_t-transaction_properties-transaction_property[] TO ls_output-transaction_properties-transaction_property[].
+                        ENDIF.
+
+                        IF ls_output-error-inner_errors IS NOT INITIAL.
+                          CALL FUNCTION 'ECATT_CONV_XSTRING_TO_STRING'
+                            EXPORTING
+                              im_xstring  = ls_output-error-inner_errors
+                              im_encoding = 'UTF-8'
+                            IMPORTING
+                              ex_string   = resstr.
+                        ELSE.
+
+                          READ TABLE ls_output-transaction_properties-transaction_property
+                               INTO st_property
+                               WITH KEY key = 'Timbre.UUID'.
+                          IF sy-subrc EQ 0.
+                            e_uuid = st_property-value.
+                          ENDIF.
+                          READ TABLE ls_output-transaction_properties-transaction_property
+                               INTO st_property
+                               WITH KEY key = 'Timbre.CadenaOriginal'.
+                          IF sy-subrc EQ 0.
+                            vcoriginal = st_property-value.
+                          ENDIF.
+                          READ TABLE ls_output-transaction_properties-transaction_property
+                         INTO st_property
+                         WITH KEY key = 'Timbre.FechaTimbrado'.
+                          IF sy-subrc EQ 0.
+                            vfechatimbre = st_property-value.
+                          ENDIF.
+
+                        ENDIF.
+
+                        CLEAR lv_buffer.
+                        CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+                          EXPORTING
+                            text   = resstr
+                          IMPORTING
+                            buffer = lv_buffer
+                          EXCEPTIONS
+                            failed = 1
+                            OTHERS = 2.
+                        IF sy-subrc <> 0.
+* Implement suitable error handling here
+                        ENDIF.
+
+
+* Convert XML to internal table
+                        CALL FUNCTION 'SMUM_XML_PARSE'
+                          EXPORTING
+                            xml_input = lv_buffer
+                          TABLES
+                            xml_table = gt_xml_data
+                            return    = gt_return.
+                        DATA ipaso TYPE i VALUE 0.
+                        LOOP AT gt_xml_data INTO st_xml_data.
+                          ipaso = 0.
+                          TRANSLATE st_xml_data-cname TO UPPER CASE.
+                          IF st_xml_data-cname EQ 'DETAILS'.
+                            e_error = st_xml_data-cvalue.
+                            ipaso = 1.
+*                            CALL METHOD po_logger->add_message
+*                              EXPORTING
+*                                iv_msgty = 'E'
+*                                iv_msgid = 'ZCFDI_40'
+*                                iv_msgno = '001'
+*                                iv_msgv1 = st_xml_data-cname
+*                                iv_msgv2 = st_xml_data-cvalue+0(50)
+*                                iv_msgv3 = st_xml_data-cvalue+50(50)
+*                                iv_msgv4 = st_xml_data-cvalue+100(50).
+*              iv_msgv3 =
+*              iv_msgv4 = .
+                          ELSEIF st_xml_data-cname EQ 'SELLOCFD'.
+                            ls_head-sello_cfd = st_xml_data-cvalue.
+                            ipaso = 2.
+*                            CALL METHOD po_logger->add_message
+*                              EXPORTING
+*                                iv_msgty = 'E'
+*                                iv_msgid = 'ZCFDI_40'
+*                                iv_msgno = '001'
+*                                iv_msgv1 = st_xml_data-cname
+*                                iv_msgv2 = st_xml_data-cvalue.
+*              iv_msgv3 =
+*              iv_msgv4 = .
+                          ELSEIF st_xml_data-cname EQ 'SELLOSAT'.
+                            ls_head-sello_sat = st_xml_data-cvalue.
+                            ipaso = 3.
+*                            CALL METHOD po_logger->add_message
+*                              EXPORTING
+*                                iv_msgty = 'E'
+*                                iv_msgid = 'ZCFDI_40'
+*                                iv_msgno = '000'
+*                                iv_msgv1 = st_xml_data-cname
+*                                iv_msgv2 = st_xml_data-cvalue.
+*              iv_msgv3 =
+*              iv_msgv4 = .
+                          ENDIF.
+
+                          IF ipaso = 0.
+
+*                            CALL METHOD po_logger->add_message
+*                              EXPORTING
+*                                iv_msgty = 'E'
+*                                iv_msgid = 'ZCFDI_40'
+*                                iv_msgno = '001'
+*                                iv_msgv1 = st_xml_data-cname
+*                                iv_msgv2 = st_xml_data-cvalue+0(50)
+*                                iv_msgv3 = st_xml_data-cvalue+50(50)
+*                                iv_msgv4 = st_xml_data-cvalue+100(50).
+*              iv_msgv3 =
+*              iv_msgv4 = .
+
+                            ipaso = 0.
+                          ENDIF.
+
+                        ENDLOOP.
+*- Actualiza tabla
+                        IF e_uuid IS NOT INITIAL.
+                          ls_head-uuid = e_uuid.
+                          ls_head-status = 'T'.
+                          ls_head-fecha_timbrado = sy-datum.
+                          ls_head-hora_timbrado = sy-uzeit.
+                        ELSE.
+                          ls_head-uuid = e_uuid.
+                          ls_head-status = 'E'.
+                        ENDIF.
+
+                        CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+                          EXPORTING
+                            text   = ls_output-result
+                          IMPORTING
+                            buffer = ls_head-xml_timb
+                          EXCEPTIONS
+                            failed = 1
+                            OTHERS = 2.
+                        IF sy-subrc = 0.
+                          ls_40xml-bukrs = ls_head-bukrs.
+                          ls_40xml-factura = ls_head-belnr.
+                          lv_vbeln         = ls_head-belnr.
+                          ls_40xml-fkart = ''.
+                          ls_40xml-vkorg = ''.
+                          ls_40xml-gjahr = ls_head-bldat.
+                          ls_40xml-xml   = ls_output-result.
+
+
+                          MODIFY zcfdi_40_xml FROM ls_40xml.
+* Implement suitable error handling here
+                        ENDIF.
+
+*- Actualiza campos de cabecera
+                        ls_head-uso_cfdi       = lv_usocfdi.
+                        ls_head-metodo_pago    = lv_metpag.
+                        ls_head-forma_pago     = lv_fp.
+                        ls_head-folio_xml      = lv_folio.
+                        ls_head-serie_xml      = lv_serie.
+                        ls_head-fechatimbrados = vfechatimbre.
+
+                        "Se recupera los datos del XML.
+
+                        CALL FUNCTION 'ZAGREGA_FILE_CFDI40'
+                          EXPORTING
+                            pfactura         = lv_vbeln                 " Número de documento comercial
+                            pbukrs           = lv_bukrs                 " Sociedad
+                            pgjahr           = lv_pgjahr                 " Ejercicio
+                            ppath            = v_ruta
+                            opcion           = 'PARSE'
+                            pxml             = ls_head-xml_timb
+                          IMPORTING
+                            uuid             = vuuid                " Texto 36 pos.
+                            fecha_timbrado   = vftimbrado " Fecha de documento en documento
+                            sello_sat        = vsellosat
+                            sello_cfd        = vsello_cfd
+                            rfcprovcertif    = vrfcprovcertif
+                            nocertificado    = vnocertificado
+                            nocertificadosat = vnocertificadosat
+                            monedaxml        = vmonedaxml
+                            exportacion      = vexportacion
+                            tipocambioxml    = vtipocambioxml
+                            FechaFac         = vFechaFac
+                          .       " PAC
+                            ls_head-fechafact = vFechaFac.
+
+
+
+                        ls_head-rfcprovcertif         = vrfcprovcertif.
+                        ls_head-uuid                  = vuuid.
+                        ls_head-fecha_timbrado        = vftimbrado.
+                        ls_head-sello_sat             = vsellosat.
+                        ls_head-sello_cfd             = vsello_cfd.
+                        ls_head-cadena_original       = vcoriginal.
+                        ls_head-pedidocte             = i_pedido.
+                        Ls_head-RegimenFiscalReceptor = vreceptor.
+
+                        ls_head-nocertificado         =  vnocertificado.
+                        ls_head-nocertificadosat      =  vnocertificadosat.
+                        ls_head-monedaxml             =  vmonedaxml.
+                        ls_head-exportacion           =  vexportacion.
+                        ls_head-tipocambioxml         =  vtipocambioxml.
+                        "Actualiza la tabla.
+
+                        MODIFY zcfdi_head_40 FROM ls_head.
+                        "LEE LA TABLA zcfdi_head_40 , PARA RECUPERAR DATOS DE AHI.
+                        "AGREGO EL ARCHIVO XML AL GOS.
+                        CALL FUNCTION 'ZAGREGA_FILE_CFDI40'
+                          EXPORTING
+                            pfactura       = lv_vbeln                 " Número de documento comercial
+                            pbukrs         = lv_bukrs                 " Sociedad
+                            pgjahr         = lv_pgjahr                 " Ejercicio
+                            ppath          = v_ruta
+                            opcion         = 'XML'
+                          IMPORTING
+                            uuid           = vuuid                " Texto 36 pos.
+                            fecha_timbrado = vftimbrado " Fecha de documento en documento
+                            sello_sat      = vsellosat
+*                            sello_cfd      = vsello_cfd
+                            Sello_cfd       = vsello_cfd
+                            rfcprovcertif  = vrfcprovcertif.       " PAC
+
+*    ls_head-rfcprovcertif = vrfcprovcertif.
+
+                        CALL FUNCTION 'ZMFCFDI40_QR'
+                          EXPORTING
+                            puuid        = ls_head-uuid                 " UUID
+                            rfc_emisor   = ls_head-rfc_emisor   " RFC EMISOR
+                            rfc_receptor = ls_head-rfc_receptor        " RFC RECEPTOR
+                            pextranjero  = '1'                " Extranjero
+                            ptotal       = ptotal                 " Total replicado en ceros
+                            pselloemisor = ls_head-sello_cfd                " Ultimo 8 caracteres Sello digital del emisor CFDI
+                          IMPORTING
+                            purl         = e_url.                " url para qr
+
+
+                        ls_head-qr = e_url.
+
+                        MODIFY zcfdi_head_40 FROM ls_head.
+*                        CALL METHOD po_logger->add_message
+*                          EXPORTING
+*                            iv_msgty = 'I'
+*                            iv_msgid = 'ZCFDI_40'
+*                            iv_msgno = '100'
+*                            iv_msgv1 = 'Descargo el archivo '
+*                            iv_msgv2 = v_ruta.
+
+                        PERFORM anexa_xml
+                              USING
+                                 lv_vbeln
+                                 e_uuid.
+
+*                        CALL METHOD po_logger->add_message
+*                          EXPORTING
+*                            iv_msgty = 'I'
+*                            iv_msgid = 'ZCFDI_40'
+*                            iv_msgno = '100'
+*                            iv_msgv1 = 'Anexo Archivo'
+*                            iv_msgv2 = v_ruta
+*                            iv_msgv3 = e_uuid.
+                      ENDLOOP.
+
+                    ENDFUNCTION.

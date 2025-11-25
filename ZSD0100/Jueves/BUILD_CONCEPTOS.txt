@@ -1,0 +1,112 @@
+METHOD build_conceptos.
+  DATA lv_opened TYPE abap_bool VALUE abap_false.
+
+  FIELD-SYMBOLS: <d>        TYPE any,
+                 <f_qty>    TYPE any,
+                 <f_unit>   TYPE any,
+                 <f_amt>    TYPE any,
+                 <f_iva>    TYPE any,
+                 <f_desc>   TYPE any,
+                 <f_mat>    TYPE any,
+                 <f_cprod>  TYPE any,
+                 <f_cuni>   TYPE any.
+
+  LOOP AT mt_det ASSIGNING <d>.
+    "---- mapear campos típicos
+    UNASSIGN: <f_qty>, <f_unit>, <f_amt>, <f_iva>, <f_desc>, <f_mat>, <f_cprod>, <f_cuni>.
+    ASSIGN COMPONENT 'CANTIDAD'        OF STRUCTURE <d> TO <f_qty>.   IF <f_qty>  IS NOT ASSIGNED. ASSIGN COMPONENT 'FKIMG'        OF STRUCTURE <d> TO <f_qty>.  ENDIF.
+    ASSIGN COMPONENT 'VALOR_UNIT'      OF STRUCTURE <d> TO <f_unit>.
+    ASSIGN COMPONENT 'DMBTR'           OF STRUCTURE <d> TO <f_amt>.   IF <f_amt>  IS NOT ASSIGNED. ASSIGN COMPONENT 'NETWR'        OF STRUCTURE <d> TO <f_amt>.  ENDIF.
+    IF <f_amt> IS NOT ASSIGNED. ASSIGN COMPONENT 'IMPORTE' OF STRUCTURE <d> TO <f_amt>. ENDIF.
+    ASSIGN COMPONENT 'IMPORTE_IVA'     OF STRUCTURE <d> TO <f_iva>.   IF <f_iva>  IS NOT ASSIGNED. ASSIGN COMPONENT 'IVA'          OF STRUCTURE <d> TO <f_iva>.  ENDIF.
+    IF <f_iva> IS NOT ASSIGNED. ASSIGN COMPONENT 'MWSBK' OF STRUCTURE <d> TO <f_iva>. ENDIF.
+    ASSIGN COMPONENT 'DESCRIPCION'     OF STRUCTURE <d> TO <f_desc>.  IF <f_desc> IS NOT ASSIGNED. ASSIGN COMPONENT 'MAKTX'        OF STRUCTURE <d> TO <f_desc>. ENDIF.
+    ASSIGN COMPONENT 'PROD_EKA'        OF STRUCTURE <d> TO <f_mat>.   IF <f_mat>  IS NOT ASSIGNED. ASSIGN COMPONENT 'MATNR'        OF STRUCTURE <d> TO <f_mat>.  ENDIF.
+    ASSIGN COMPONENT 'CLAVE_PRODSERV'  OF STRUCTURE <d> TO <f_cprod>.
+    ASSIGN COMPONENT 'CLAVE_UNIDAD'    OF STRUCTURE <d> TO <f_cuni>.
+
+    "---- normalizar valores
+    DATA(lv_qty)  = CONV decfloat34( 0 ).
+    DATA(lv_unit) = CONV decfloat34( 0 ).
+    DATA(lv_amt)  = CONV decfloat34( 0 ).
+    DATA(lv_iva)  = CONV decfloat34( 0 ).
+
+    IF <f_qty>  IS ASSIGNED. lv_qty  = CONV decfloat34( <f_qty>  ). ENDIF.
+    IF <f_unit> IS ASSIGNED. lv_unit = CONV decfloat34( <f_unit> ). ENDIF.
+    IF <f_amt>  IS ASSIGNED. lv_amt  = CONV decfloat34( <f_amt>  ). ENDIF.
+    IF <f_iva>  IS ASSIGNED. lv_iva  = CONV decfloat34( <f_iva>  ). ENDIF.
+
+    IF lv_unit = 0 AND lv_qty > 0 AND lv_amt > 0.
+      lv_unit = lv_amt / lv_qty.
+    ENDIF.
+    IF lv_amt = 0 AND lv_qty > 0 AND lv_unit > 0.
+      lv_amt = lv_qty * lv_unit.
+    ENDIF.
+
+    IF lv_opened = abap_false.
+      me->append_line( EXPORTING iv_line = '<cfdi:Conceptos>' CHANGING ct_xml = ct_xml ).
+      lv_opened = abap_true.
+    ENDIF.
+
+    "---- strings formateados
+    DATA(lv_valunit_str) = |{ lv_unit DECIMALS = 6 }|.
+    REPLACE ALL OCCURRENCES OF ',' IN lv_valunit_str WITH '.'.
+    DATA(lv_imp_str) = |{ lv_amt DECIMALS = 2 }|.
+    REPLACE ALL OCCURRENCES OF ',' IN lv_imp_str WITH '.'.
+    DATA(lv_qty_str) = |{ lv_qty DECIMALS = 6 }|.
+    REPLACE ALL OCCURRENCES OF ',' IN lv_qty_str WITH '.'.
+
+    "---- claves (AQUÍ estaban faltando las DATA)
+    DATA lv_cprod TYPE string VALUE '01010101'.
+    DATA lv_cuni  TYPE string VALUE 'H87'.
+    IF <f_cprod> IS ASSIGNED AND <f_cprod> IS NOT INITIAL. lv_cprod = <f_cprod>. ENDIF.
+    IF <f_cuni>  IS ASSIGNED AND <f_cuni>  IS NOT INITIAL. lv_cuni  = <f_cuni>.  ENDIF.
+
+    DATA lv_desc TYPE string VALUE 'Servicio'.
+    IF <f_desc> IS ASSIGNED AND <f_desc> IS NOT INITIAL.
+      lv_desc = <f_desc>.
+    ELSEIF <f_mat> IS ASSIGNED AND <f_mat> IS NOT INITIAL.
+      lv_desc = <f_mat>.
+    ENDIF.
+
+    "---- concepto
+    DATA lv_attr TYPE string.
+    me->add_attr( EXPORTING i_name = 'ClaveProdServ'  i_val = lv_cprod       CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Cantidad'       i_val = lv_qty_str     CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'ClaveUnidad'    i_val = lv_cuni        CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Descripcion'    i_val = lv_desc        CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'ValorUnitario'  i_val = lv_valunit_str CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Importe'        i_val = lv_imp_str     CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'ObjetoImp'      i_val = COND string( WHEN lv_iva > 0 THEN '02' ELSE '01' )
+                  CHANGING cv_attr = lv_attr ).
+    me->append_line( EXPORTING iv_line = |<cfdi:Concepto { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+
+    "---- impuestos por concepto
+    IF lv_iva > 0.
+      DATA lv_attr_t   TYPE string.
+      DATA(lv_base_str) = |{ lv_amt DECIMALS = 2 }|. REPLACE ALL OCCURRENCES OF ',' IN lv_base_str WITH '.'.
+      DATA(lv_iva_str)  = |{ lv_iva DECIMALS = 2 }|. REPLACE ALL OCCURRENCES OF ',' IN lv_iva_str  WITH '.'.
+      DATA(lv_tasa)     = COND decfloat34( WHEN lv_amt > 0 THEN lv_iva / lv_amt ELSE '0.16' ).
+      IF lv_tasa = 0 AND lv_iva > 0. lv_tasa = '0.16'. ENDIF.
+      DATA(lv_tasa_str) = |{ lv_tasa DECIMALS = 6 }|. REPLACE ALL OCCURRENCES OF ',' IN lv_tasa_str WITH '.'.
+
+      me->append_line( EXPORTING iv_line = '<cfdi:Impuestos>'  CHANGING ct_xml = ct_xml ).
+      me->append_line( EXPORTING iv_line = '<cfdi:Traslados>'  CHANGING ct_xml = ct_xml ).
+      CLEAR lv_attr_t.
+      me->add_attr( EXPORTING i_name = 'Base'       i_val = lv_base_str CHANGING cv_attr = lv_attr_t ).
+      me->add_attr( EXPORTING i_name = 'Impuesto'   i_val = '002'       CHANGING cv_attr = lv_attr_t ).
+      me->add_attr( EXPORTING i_name = 'TipoFactor' i_val = 'Tasa'      CHANGING cv_attr = lv_attr_t ).
+      me->add_attr( EXPORTING i_name = 'TasaOCuota' i_val = lv_tasa_str CHANGING cv_attr = lv_attr_t ).
+      me->add_attr( EXPORTING i_name = 'Importe'    i_val = lv_iva_str  CHANGING cv_attr = lv_attr_t ).
+      me->append_line( EXPORTING iv_line = |<cfdi:Traslado { lv_attr_t }/>| CHANGING ct_xml = ct_xml ).
+      me->append_line( EXPORTING iv_line = '</cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+      me->append_line( EXPORTING iv_line = '</cfdi:Impuestos>' CHANGING ct_xml = ct_xml ).
+    ENDIF.
+
+    me->append_line( EXPORTING iv_line = '</cfdi:Concepto>' CHANGING ct_xml = ct_xml ).
+  ENDLOOP.
+
+  IF lv_opened = abap_true.
+    me->append_line( EXPORTING iv_line = '</cfdi:Conceptos>' CHANGING ct_xml = ct_xml ).
+  ENDIF.
+ENDMETHOD.

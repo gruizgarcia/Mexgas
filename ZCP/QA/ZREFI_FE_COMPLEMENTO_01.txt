@@ -1,0 +1,14 @@
+
+INCLUDE zrefi_fe_complemento_fi. "Declaraciones FI
+
+INCLUDE zrefi_fe_complemento_sd. "Declaraciones SD
+
+INCLUDE zrefi_fe_complemento_dge. "Declaraciones Generales
+
+INCLUDE zrefi_fe_validaciones_xml."Validaciones y variables.
+
+*{   INSERT         GSDK912878                                        1
+*INCLUDE zrefi_fe_complemento_tax_t. "Declaraciones tablas impuestos*
+*
+*INCLUDE zrefi_fe_complemento_ZTA1_CP2.  "Declaraciones tabla ZTA1 2.0
+*}   INSERT

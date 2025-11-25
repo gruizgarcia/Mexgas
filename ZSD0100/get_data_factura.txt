@@ -1,0 +1,228 @@
+FORM get_data_factura  USING    pvbeln pfechadoc.
+
+  DATA:    fecha_f           TYPE d.
+
+  DATA :
+    l_exch_rate  TYPE bapi1093_0,
+    l_return     TYPE bapiret1,
+    pi_fcurr_des TYPE tcurr_curr.
+
+  CONSTANTS: c_usd(3) TYPE c VALUE 'USD',
+             c_mxn(3) TYPE c VALUE 'MXN'.
+
+  pi_fcurr_des = 'MXN'.
+  DATA: vgjahr TYPE gjahr.
+
+  CLEAR ls_vbrk.
+  ls_vbco3-spras = sy-langu.      " Clave de idioma
+  ls_vbco3-vbeln = pvbeln.  " Número de documento comercial
+
+* Obtiene los datos de la factura.
+  CLEAR gs_header_printvw.
+  REFRESH gt_positions_printvw.
+  CALL FUNCTION 'RV_BILLING_PRINT_VIEW'
+    EXPORTING
+      comwa                        = ls_vbco3
+    IMPORTING
+      kopf                         = gs_header_printvw
+    TABLES
+      pos                          = gt_positions_printvw
+    EXCEPTIONS
+      terms_of_payment_not_in_t052 = 1
+      OTHERS                       = 2.
+  IF sy-subrc NE 0.
+
+*    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+*      EXPORTING
+*        input  = pvbeln
+*      IMPORTING
+*        output = me->gv_msgv1.
+*
+**   Error al obtener los datos de la factura &MSGV1&
+*    RAISE EXCEPTION TYPE zcx_cfdi_33
+*      EXPORTING
+*        textid = zcx_cfdi_33=>get_invoice
+*        msgv1  = me->gv_msgv1.
+
+  ENDIF.
+
+  SORT gt_positions_printvw BY posnr.
+
+  ls_vbrk-vbeln = pvbeln.
+
+* Obtiene los datos de las posiciones (clases de condición).
+  REFRESH: gt_pos_price_cond,
+           gt_partners,
+           lt_header,
+           gt_positions.
+
+  CALL FUNCTION 'RV_INVOICE_DOCUMENT_READ'
+    EXPORTING
+      konv_read    = abap_true
+      no_nast      = space
+      vbrk_i       = ls_vbrk
+    TABLES
+      xkomv        = gt_pos_price_cond
+      xvbpa        = gt_partners
+      xvbrk        = lt_header
+      xvbrp        = gt_positions
+    EXCEPTIONS
+      no_authority = 1
+      OTHERS       = 2.
+  IF sy-subrc NE 0.
+*
+*    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+*      EXPORTING
+*        input  = me->gv_invoice_number
+*      IMPORTING
+*        output = me->gv_msgv1.
+*
+**   Error al obtener los datos de la factura &MSGV1&
+*    RAISE EXCEPTION TYPE zcx_cfdi_33
+*      EXPORTING
+*        textid = zcx_cfdi_33=>get_invoice
+*        msgv1  = me->gv_msgv1.
+
+  ENDIF.
+
+  SORT lt_header BY vbeln.
+  SORT gt_positions BY vbeln posnr.
+
+  SELECT SINGLE *
+   INTO wa_t001
+   FROM t001
+  WHERE bukrs EQ '0100'.
+
+  SELECT SINGLE *
+    INTO wa_adrc
+    FROM adrc
+   WHERE addrnumber EQ wa_t001-adrnr.
+
+  READ TABLE lt_header
+    INTO gs_header
+    BINARY SEARCH
+    WITH KEY vbeln = pvbeln.
+  IF sy-subrc EQ 0.
+    CLEAR wa_head_cfdi.
+*    SELECT SINGLE uso_cfdi
+*     FROM zfe_cat_series
+*     INTO gv_usocfdi
+*    WHERE blart EQ 'FF'.
+
+    SELECT SINGLE stcd1
+     INTO gv_rfc
+     FROM kna1
+    WHERE kunnr EQ gs_header-kunag.
+
+    SELECT SINGLE paval
+     FROM t001z
+     INTO gv_rfc_e
+     WHERE bukrs = gs_header-bukrs
+       AND party = 'MX_RFC'.
+
+    IF gs_header-waerk = 'MXN'.
+      wa_head_cfdi-tipo_cambio     = 1.
+    ELSE.
+      CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+        EXPORTING
+          rate_type  = 'M'                " Exchange Rate Type
+          from_curr  = gs_header-waerk              " From Currency
+          to_currncy = pi_fcurr_des             " To Currency
+          date       = pfechadoc          " Value Date
+        IMPORTING
+          exch_rate  = l_exch_rate
+          return     = l_return.
+      IF sy-subrc = 0.
+        wa_head_cfdi-tipo_cambio     = l_exch_rate-exch_rate.
+      ELSE.
+        wa_head_cfdi-tipo_cambio     = 1.
+      ENDIF.
+    ENDIF.
+
+    wa_head_cfdi-tipo_comp       = 'I'.
+    wa_head_cfdi-bukrs           = gs_header-bukrs.
+    wa_head_cfdi-belnr           = gs_header-vbeln. "ID FACTURA EKA
+    wa_head_cfdi-bldat           = gs_header-fkdat.
+    wa_head_cfdi-gjahr           = gs_header-fkdat(4).
+    vgjahr                       = gs_header-fkdat(4).
+
+    wa_head_cfdi-tipo_doc        = 'FF'.
+*    wa_head_cfdi-bldat           = gs_header-aedat.
+    wa_head_cfdi-uzeit           = sy-uzeit.
+    wa_head_cfdi-lugar_exp       = wa_adrc-post_code1.
+    wa_head_cfdi-total           = gs_header-netwr + gs_header-mwsbk.
+
+    wa_head_cfdi-waers           = gs_header-waerk.
+    wa_head_cfdi-total_iva       = gs_header-mwsbk.
+    wa_head_cfdi-subtotal        = gs_header-netwr  . "Subtotal e IVA
+    wa_head_cfdi-version         = '4.0'.
+    wa_head_cfdi-regimen_fiscal  = '601'.
+    wa_head_cfdi-kunnr           = gs_header-kunag.
+    wa_head_cfdi-nombre_emisor   = wa_t001-butxt.
+    wa_head_cfdi-rfc_emisor      = gv_rfc_e.
+    wa_head_cfdi-nombre_receptor = wa_eka_op_eod-companyname.
+    wa_head_cfdi-rfc_receptor    = gv_rfc.
+    wa_head_cfdi-factura         = gs_header-belnr.
+    wa_head_cfdi-uso_cfdi        = gv_usocfdi. "Definir.
+
+    wa_head_cfdi-vkorg           = gs_header-vkorg.
+    wa_head_cfdi-vtweg           = gs_header-vtweg.
+    wa_head_cfdi-spart           = gs_header-spart.
+
+
+
+    IF gv_uuid IS NOT INITIAL.
+      wa_head_cfdi-relac           = abap_true. "Definir.
+    ENDIF.
+    wa_head_cfdi-uuid_relac      = gv_uuid. "Definir.
+
+    APPEND wa_head_cfdi TO gt_head_cfdi.
+  ELSE.
+*    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+*      EXPORTING
+*        input  = me->gv_invoice_number
+*      IMPORTING
+*        output = me->gv_msgv1.
+*
+**   Error al leer la cabecera de la factura &
+*    RAISE EXCEPTION TYPE zcx_cfdi_33
+*      EXPORTING
+*        textid = zcx_cfdi_33=>read_header
+*        msgv1  = me->gv_msgv1.
+
+  ENDIF.
+
+  SORT gt_pos_price_cond BY knumv kposn kschl.
+
+  FIELD-SYMBOLS: <ls_vbrpvb> TYPE vbrpvb,
+                 <ls_prices> TYPE komv.
+
+  DATA: v_tasa TYPE p DECIMALS 2.
+  v_tasa = '0.16'.
+*   Valido que venga la tabla principal llena
+  IF gt_head_cfdi IS NOT INITIAL.
+    LOOP AT gt_positions ASSIGNING <ls_vbrpvb>.
+
+      wa_det_cfdi-bukrs            = '0100'.
+      wa_det_cfdi-belnr            = <ls_vbrpvb>-vbeln. "ID FACTURA EKA
+      wa_det_cfdi-gjahr            = vgjahr.
+      wa_det_cfdi-dmbtr            = <ls_vbrpvb>-netwr.
+      wa_det_cfdi-valor_unit       = <ls_vbrpvb>-netwr.
+      wa_det_cfdi-descripcion      = wa_zequival-descrip.
+      wa_det_cfdi-clave_unidad     = wa_zequival-unidad_sat.
+      wa_det_cfdi-cantidad         = <ls_vbrpvb>-fkimg.
+      wa_det_cfdi-clave_prod_serv  = wa_zequival-clave_sat.
+      wa_det_cfdi-prod_eka         = <ls_vbrpvb>-matnr.
+*          wa_det_cfdi-importe_iva      =
+
+
+*          Loop At gt_pos_price_cond ASSIGNING <ls_prices> Where kschl Eq 'MWST'.
+      wa_det_cfdi-dmbtr       = <ls_vbrpvb>-netwr.
+      wa_det_cfdi-importe_iva = <ls_vbrpvb>-netwr * v_tasa.
+*          EndLoop.
+
+      APPEND wa_det_cfdi TO gt_det_cfdi.
+    ENDLOOP.
+  ENDIF.
+
+ENDFORM.

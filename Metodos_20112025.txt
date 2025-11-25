@@ -1,0 +1,305 @@
+METHOD build_conceptos_ixml.
+
+  "==============================================================
+  " 1) TCURX - Decimales
+  "==============================================================
+  DATA lv_curr_dec TYPE i VALUE 2.
+  FIELD-SYMBOLS: <fs_head> TYPE any,
+                 <fs_waers> TYPE any.
+
+  READ TABLE mt_head INDEX 1 ASSIGNING <fs_head>.
+  IF sy-subrc = 0.
+    ASSIGN COMPONENT 'WAERS' OF STRUCTURE <fs_head> TO <fs_waers>.
+    IF <fs_waers> IS ASSIGNED AND <fs_waers> IS NOT INITIAL.
+      SELECT SINGLE currdec INTO lv_curr_dec FROM tcurx WHERE currkey = <fs_waers>.
+      IF sy-subrc <> 0 OR lv_curr_dec IS INITIAL.
+        lv_curr_dec = 2.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  "==============================================================
+  " 2) No detalles
+  "==============================================================
+  IF mt_det IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  "==============================================================
+  " 3) Cache ZEQUIVAL_40
+  "==============================================================
+  TYPES: BEGIN OF ty_equiv,
+           zmaterial   TYPE zequival_40-zmaterial,
+           descrip     TYPE zequival_40-descrip,
+           unidad_sat  TYPE zequival_40-unidad_sat,
+           xml_um      TYPE zequival_40-xml_um,
+           clave_sat   TYPE zequival_40-clave_sat,
+         END OF ty_equiv.
+
+  DATA mt_equiv TYPE HASHED TABLE OF ty_equiv WITH UNIQUE KEY zmaterial.
+  DATA ls_equiv TYPE ty_equiv.
+
+  IF mt_equiv IS INITIAL.
+    SELECT zmaterial descrip unidad_sat xml_um clave_sat
+      FROM zequival_40
+      INTO TABLE mt_equiv.
+  ENDIF.
+
+  "==============================================================
+  " 4) Nodo padre
+  "==============================================================
+  DATA(lo_doc) = co_parent->get_owner_document( ).
+  DATA(lo_conceptos) = lo_doc->create_simple_element(
+                          name   = 'cfdi:Conceptos'
+                          parent = co_parent ).
+
+  "==============================================================
+  " 5) LOOP detalle
+  "==============================================================
+  FIELD-SYMBOLS:
+      <d>         TYPE any,
+      <f_qty>     TYPE any, <f_unit> TYPE any, <f_amt> TYPE any,
+      <f_desc>    TYPE any, <f_clvps> TYPE any, <f_clvuni> TYPE any,
+      <f_matnr>   TYPE any, <f_kpein> TYPE any,
+      <f_impiva>  TYPE any, <f_tasa> TYPE any,
+      <f_ivaperc> TYPE any, <f_objimp> TYPE any,
+      <f_prod>    TYPE any.
+
+  LOOP AT mt_det ASSIGNING <d>.
+
+    " Reset
+    UNASSIGN: <f_qty>,<f_unit>,<f_amt>,<f_desc>,<f_clvps>,<f_clvuni>,
+              <f_matnr>,<f_kpein>,<f_impiva>,<f_tasa>,<f_ivaperc>,
+              <f_objimp>,<f_prod>.
+
+    "==========================================================
+    " 5.1 PROD_EKA / MATNR / Equivalencias
+    "==========================================================
+    ASSIGN COMPONENT 'PROD_EKA' OF STRUCTURE <d> TO <f_prod>.
+    IF <f_prod> IS NOT ASSIGNED.
+      ASSIGN COMPONENT 'MATNR' OF STRUCTURE <d> TO <f_prod>.
+    ENDIF.
+
+    DATA(lv_has_equiv) = abap_false.
+    DATA lv_prod TYPE matnr.
+
+    IF <f_prod> IS ASSIGNED AND <f_prod> IS NOT INITIAL.
+      lv_prod = <f_prod>.
+      TRANSLATE lv_prod TO UPPER CASE.
+      CONDENSE lv_prod NO-GAPS.
+
+      READ TABLE mt_equiv INTO ls_equiv WITH TABLE KEY zmaterial = lv_prod.
+      IF sy-subrc = 0.
+        lv_has_equiv = abap_true.
+      ENDIF.
+    ENDIF.
+
+    "==========================================================
+    " 5.2 Campos estándar
+    "==========================================================
+    ASSIGN COMPONENT 'CANTIDAD' OF STRUCTURE <d> TO <f_qty>.
+    IF <f_qty> IS NOT ASSIGNED.
+      ASSIGN COMPONENT 'FKIMG' OF STRUCTURE <d> TO <f_qty>.
+    ENDIF.
+
+    ASSIGN COMPONENT 'VALOR_UNITARIO' OF STRUCTURE <d> TO <f_unit>.
+    IF <f_unit> IS NOT ASSIGNED.
+      ASSIGN COMPONENT 'VALOR_UNIT' OF STRUCTURE <d> TO <f_unit>.
+    ENDIF.
+    IF <f_unit> IS NOT ASSIGNED.
+      ASSIGN COMPONENT 'KBETR' OF STRUCTURE <d> TO <f_unit>.
+    ENDIF.
+
+    ASSIGN COMPONENT 'IMPORTE' OF STRUCTURE <d> TO <f_amt>.
+    IF <f_amt> IS NOT ASSIGNED.
+      ASSIGN COMPONENT 'DMBTR' OF STRUCTURE <d> TO <f_amt>.
+    ENDIF.
+
+    ASSIGN COMPONENT 'DESCRIPCION'       OF STRUCTURE <d> TO <f_desc>.
+    ASSIGN COMPONENT 'CLAVE_PROD_SERV'   OF STRUCTURE <d> TO <f_clvps>.
+    ASSIGN COMPONENT 'CLAVE_UNIDAD'      OF STRUCTURE <d> TO <f_clvuni>.
+    ASSIGN COMPONENT 'KPEIN'             OF STRUCTURE <d> TO <f_kpein>.
+    ASSIGN COMPONENT 'IMPORTE_IVA'       OF STRUCTURE <d> TO <f_impiva>.
+    ASSIGN COMPONENT 'TASAOCUOTA'        OF STRUCTURE <d> TO <f_tasa>.
+    IF <f_tasa> IS NOT ASSIGNED.
+      ASSIGN COMPONENT 'TASA' OF STRUCTURE <d> TO <f_tasa>.
+    ENDIF.
+    ASSIGN COMPONENT 'IVA_PORCENTAJE'    OF STRUCTURE <d> TO <f_ivaperc>.
+    ASSIGN COMPONENT 'OBJETOIMP'         OF STRUCTURE <d> TO <f_objimp>.
+
+    "==========================================================
+    " 5.3 Cálculo correctos (CORREGIDO)
+    "==========================================================
+    DATA: lv_qty     TYPE decfloat34 VALUE 0,
+          lv_unit    TYPE decfloat34 VALUE 0,
+          lv_importe TYPE decfloat34 VALUE 0,
+          lv_base    TYPE decfloat34 VALUE 0,
+          lv_iva     TYPE decfloat34 VALUE 0,
+          lv_rate    TYPE decfloat34 VALUE 0,
+          lv_rate6   TYPE string,
+          lv_objimp  TYPE string.
+
+    IF <f_qty> IS ASSIGNED.  lv_qty     = <f_qty>.  ENDIF.
+    IF <f_unit> IS ASSIGNED. lv_unit    = <f_unit>. ENDIF.
+    IF <f_amt> IS ASSIGNED.  lv_importe = <f_amt>.  ENDIF.
+
+    DATA lv_kpe TYPE decfloat34.
+    IF <f_kpein> IS ASSIGNED AND <f_kpein> IS NOT INITIAL.
+  MOVE <f_kpein> TO lv_kpe.
+
+  IF lv_kpe > 0.
+    lv_unit = lv_unit / lv_kpe.
+  ENDIF.
+ENDIF.
+
+
+    lv_base = lv_qty * lv_unit.
+    IF lv_importe = 0.
+      lv_importe = lv_base.
+    ENDIF.
+
+    IF <f_ivaperc> IS ASSIGNED AND <f_ivaperc> IS NOT INITIAL.
+      lv_rate = <f_ivaperc>.
+    ELSEIF <f_tasa> IS ASSIGNED AND <f_tasa> IS NOT INITIAL.
+      lv_rate = <f_tasa>.
+    ENDIF.
+
+    IF lv_rate > 1 AND lv_rate <= 100.
+      lv_rate = lv_rate / 100.
+    ENDIF.
+
+    IF lv_rate > '0.159999' AND lv_rate < '0.160001'.
+      lv_rate = '0.16'.
+    ENDIF.
+
+    lv_rate6 = |{ lv_rate DECIMALS = 6 }|.
+
+    IF lv_rate > 0.
+      lv_iva = lv_importe * lv_rate.
+    ELSEIF <f_impiva> IS ASSIGNED AND <f_impiva> IS NOT INITIAL.
+      lv_iva = <f_impiva>.
+    ENDIF.
+
+    lv_objimp = COND string(
+                  WHEN <f_objimp> IS ASSIGNED AND <f_objimp> IS NOT INITIAL THEN <f_objimp>
+                  WHEN lv_rate = 0 THEN '01'
+                  ELSE '02' ).
+
+    "==========================================================
+    " 5.4 Equivalencias CFDI SAT
+    "==========================================================
+    DATA: lv_clvps  TYPE string,
+          lv_clvuni TYPE string,
+          lv_desc2  TYPE string,
+          lv_unidad TYPE string.
+
+    IF lv_has_equiv = abap_true.
+      lv_clvps  = ls_equiv-clave_sat.
+      lv_clvuni = ls_equiv-unidad_sat.
+      lv_desc2  = ls_equiv-descrip.
+      lv_unidad = ls_equiv-xml_um.
+    ENDIF.
+
+    IF lv_clvps IS INITIAL AND <f_clvps> IS ASSIGNED. lv_clvps = <f_clvps>. ENDIF.
+    IF lv_clvps IS INITIAL. lv_clvps = '01010101'. ENDIF.
+
+    IF lv_clvuni IS INITIAL AND <f_clvuni> IS ASSIGNED. lv_clvuni = <f_clvuni>. ENDIF.
+    IF lv_clvuni IS INITIAL. lv_clvuni = 'E48'. ENDIF.
+
+    IF lv_desc2 IS INITIAL AND <f_desc> IS ASSIGNED. lv_desc2 = <f_desc>. ENDIF.
+    IF lv_desc2 IS INITIAL. lv_desc2 = 'PRODUCTO'. ENDIF.
+
+    "==========================================================
+    " 5.5 Crear <cfdi:Concepto>
+    "==========================================================
+    DATA(lo_con) = lo_doc->create_simple_element(
+                      name   = 'cfdi:Concepto'
+                      parent = lo_conceptos ).
+
+    lo_con->set_attribute( name = 'ClaveProdServ' value = lv_clvps ).
+    lo_con->set_attribute( name = 'Cantidad'      value = |{ lv_qty }| ).
+    lo_con->set_attribute( name = 'ClaveUnidad'   value = lv_clvuni ).
+    lo_con->set_attribute( name = 'Descripcion'   value = lv_desc2 ).
+    lo_con->set_attribute( name = 'ValorUnitario' value = |{ lv_unit DECIMALS = lv_curr_dec }| ).
+
+    lo_con->set_attribute( name = 'Importe'
+                           value = |{ lv_importe DECIMALS = lv_curr_dec }| ).
+
+    lo_con->set_attribute( name = 'ObjetoImp' value = lv_objimp ).
+
+    IF lv_unidad IS NOT INITIAL.
+      lo_con->set_attribute( name = 'Unidad' value = lv_unidad ).
+    ENDIF.
+
+    "==========================================================
+    " 5.6 Impuestos
+    "==========================================================
+    IF lv_objimp = '02' AND lv_importe > 0.
+
+      DATA(lo_imp)
+        = lo_doc->create_simple_element( name ='cfdi:Impuestos' parent = lo_con ).
+
+      DATA(lo_trasls)
+        = lo_doc->create_simple_element( name ='cfdi:Traslados' parent = lo_imp ).
+
+      DATA(lo_tr)
+        = lo_doc->create_simple_element( name ='cfdi:Traslado' parent = lo_trasls ).
+
+      lo_tr->set_attribute(
+         name = 'Base'
+         value = |{ lv_importe DECIMALS = lv_curr_dec }| ).
+
+      lo_tr->set_attribute( name = 'Impuesto'   value = '002' ).
+      lo_tr->set_attribute( name = 'TipoFactor' value = 'Tasa' ).
+      lo_tr->set_attribute( name = 'TasaOCuota' value = lv_rate6 ).
+      lo_tr->set_attribute(
+         name = 'Importe'
+         value = |{ lv_iva DECIMALS = lv_curr_dec }| ).
+
+    ENDIF.
+
+  ENDLOOP.
+
+ENDMETHOD.
+METHOD build_xml_ixml.
+
+    DATA ls_head TYPE zet_head_40.
+    ls_head = is_head.
+
+    IF ls_head-folio_xml IS INITIAL.
+      ls_head-folio_xml = |SIN_ID_{ sy-datum }_{ sy-uname }|.
+    ENDIF.
+
+    DATA: lo_ixml TYPE REF TO if_ixml,
+          lo_doc  TYPE REF TO if_ixml_document,
+          lo_root TYPE REF TO if_ixml_element.
+
+    lo_ixml = cl_ixml=>create( ).
+    lo_doc  = lo_ixml->create_document( ).
+
+    me->build_cabecera_ixml( EXPORTING is_head = ls_head
+                             CHANGING co_doc = lo_doc co_root = lo_root ).
+
+    me->build_conceptos_ixml( CHANGING co_parent = lo_root ).
+
+    me->build_impuestos_totales_ixml(
+            EXPORTING is_head = ls_head
+            CHANGING  co_parent = lo_root ).
+
+    " ---- Render iXML to STRING UTF-16 SAP ----
+    DATA lv_xml TYPE string.
+
+    DATA(lo_stream_factory) = lo_ixml->create_stream_factory( ).
+    DATA(lo_ostream)        = lo_stream_factory->create_ostream_cstring( lv_xml ).
+    DATA(lo_renderer)       = lo_ixml->create_renderer( document = lo_doc ostream = lo_ostream ).
+
+    lo_renderer->render( ).
+
+    " ---- ESTA ES LA SALIDA FINAL ----
+    rv_xml = lv_xml.
+
+    " ---- Si el caller quiere guardar LOG ----
+    CLEAR ct_xml.
+    APPEND VALUE ty_xml( linea = rv_xml ) TO ct_xml.
+
+  ENDMETHOD.

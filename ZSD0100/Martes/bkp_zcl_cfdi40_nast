@@ -1,0 +1,661 @@
+CLASS zcl_cfdi40_nast DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+
+    METHODS constructor .
+    METHODS TimbrarXml 
+    IMPORTING
+        !is_head      TYPE zet_head_40.
+    
+    METHODS sanitizar_xml_final
+      CHANGING
+        !ct_xml TYPE string .
+    METHODS set_data
+      IMPORTING
+        !t_head_cfdi TYPE zst_head_40
+        !t_det_cfdi  TYPE zst_det_40
+        !i_pedido    TYPE vbeln_va .
+    METHODS generate
+      EXPORTING
+        !e_uuid TYPE zuuid
+        !e_url  TYPE zqr40
+      EXCEPTIONS
+        cx_cfdi_error .
+    METHODS get_xml_sat_sap
+      IMPORTING
+        !t_head_cfdi TYPE zst_head_40
+        !t_det_cfdi  TYPE zst_det_40
+        !i_addenda   TYPE char1
+        !i_pedido    TYPE vbeln_va
+      EXPORTING
+        !e_uuid      TYPE zuuid
+        !e_error     TYPE string
+        !e_url       TYPE zqr40
+      CHANGING
+        !po_logger   TYPE REF TO zcl_logger OPTIONAL .
+    METHODS add_attr
+      IMPORTING
+        !i_name  TYPE string
+        !i_val   TYPE string
+      CHANGING
+        !cv_attr TYPE string .
+    METHODS open_tag
+      IMPORTING
+        !iv_tag  TYPE string
+        !iv_attr TYPE string
+      CHANGING
+        !ct_xml  TYPE ANY TABLE .
+    METHODS trim
+      IMPORTING
+        !iv_text       TYPE any
+      RETURNING
+        VALUE(rv_text) TYPE string .
+    METHODS append_line
+      IMPORTING
+        !iv_line TYPE string
+      CHANGING
+        !ct_xml  TYPE string .
+    METHODS build_xml
+      IMPORTING
+        !is_head      TYPE zet_head_40
+      RETURNING
+        VALUE(rv_xml) TYPE string .
+    METHODS recuperar_datos_cfdi_receptor
+      IMPORTING
+        !iv_kunnr     TYPE kunnr
+      EXPORTING
+        !ev_metpag    TYPE string
+        !ev_usocfdi   TYPE string
+        !ev_nombre    TYPE string
+        !ev_regfiscal TYPE string
+        !ev_domfiscal TYPE string .
+  PROTECTED SECTION.
+  PRIVATE SECTION.
+
+    DATA:
+      mv_addenda TYPE char1,
+      mv_pedido  TYPE vbeln_va,
+      mt_head    TYPE  STANDARD TABLE OF zet_head_40,
+      mt_det     TYPE  STANDARD TABLE OF zet_det_mgs.
+
+    METHODS:
+      call_timbrado
+        IMPORTING
+          i_xml  TYPE string
+        EXPORTING
+          e_uuid TYPE zuuid
+          e_url  TYPE zqr40
+        EXCEPTIONS
+          cx_cfdi_error,
+      close_tag
+        IMPORTING
+          !iv_tag TYPE string
+        CHANGING
+          !ct_xml TYPE string,
+      build_conceptos
+        CHANGING
+          !ct_xml TYPE string,
+
+      empty_attr
+        IMPORTING
+          !iv_tag  TYPE string
+          !iv_attr TYPE string
+        CHANGING
+          !ct_xml  TYPE string ,
+      build_impuestos_totales
+        IMPORTING
+          is_head    TYPE zet_head_40
+          iv_version TYPE char4
+        CHANGING
+          ct_xml     TYPE string,
+      build_cabecera
+        IMPORTING
+          is_head TYPE zet_head_40
+        CHANGING
+          ct_xml  TYPE string.
+
+
+
+
+ENDCLASS.
+
+
+
+CLASS ZCL_CFDI40_NAST IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->ADD_ATTR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] I_NAME                         TYPE        STRING
+* | [--->] I_VAL                          TYPE        STRING
+* | [<-->] CV_ATTR                        TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_attr.
+
+    DATA: v   TYPE string,
+          par TYPE string.
+
+    v = me->trim( i_val ).
+    IF v IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CONCATENATE i_name '="' v '"' INTO par.
+
+    IF cv_attr IS INITIAL.
+      cv_attr = par.
+    ELSE.
+      CONCATENATE cv_attr par INTO cv_attr SEPARATED BY space.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->APPEND_LINE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_LINE                        TYPE        STRING
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD append_line.
+    ct_xml = ct_xml && iv_line && cl_abap_char_utilities=>newline.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_CFDI40_NAST->BUILD_CABECERA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZET_HEAD_40
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_cabecera.
+
+    DATA: lv_attr      TYPE string,
+          lv_fecha     TYPE string,
+          lv_metpag    TYPE string,
+          lv_usocfdi   TYPE string,
+          lv_nombre    TYPE string,
+          lv_regfiscal TYPE string,
+          lv_domfiscal TYPE string.
+
+
+    CLEAR: lv_attr.
+
+    " Formato correcto de fecha CFDI 4.0 → AAAA-MM-DDThh:mm:ss
+    lv_fecha = |{ sy-datum+0(4) }-{ sy-datum+4(2) }-{ sy-datum+6(2) }T{ sy-uzeit+0(2) }:{ sy-uzeit+2(2) }:{ sy-uzeit+4(2) }|.
+
+
+
+    me->recuperar_datos_cfdi_receptor(
+      EXPORTING
+        iv_kunnr   = is_head-kunnr
+      IMPORTING
+        ev_metpag  = lv_metpag
+        ev_usocfdi = lv_usocfdi
+        ev_nombre  = lv_nombre
+        ev_regfiscal =  lv_regfiscal
+        ev_domfiscal = lv_domfiscal
+    ).
+
+
+*  " Validar folio
+*  IF is_head-folio_xml IS INITIAL.
+*    is_head-folio_xml = |SIN_ID_{ sy-datum }|.
+*  ENDIF.
+
+    " Atributos del nodo <cfdi:Comprobante>
+    me->add_attr( EXPORTING i_name = 'xsi:schemaLocation'
+                            i_val  = 'http://www.sat.gob.mx/cfd/4 http://www.sat.gob.mx/sitio_internet/cfd/4/cfdv40.xsd'
+                            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'xmlns:xsi'         i_val = 'http://www.w3.org/2001/XMLSchema-instance' CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'xmlns:cfdi'        i_val = 'http://www.sat.gob.mx/cfd/4'                CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Fecha'             i_val = lv_fecha                                    CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'MetodoPago'        i_val = CONV string( is_head-metodo_pago )          CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Exportacion'       i_val = CONV string( is_head-exportacion )          CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'TipoDeComprobante' i_val = CONV string( is_head-tipo_comp )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Serie'             i_val = CONV string( is_head-serie_xml )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Folio'             i_val = CONV string( is_head-folio_xml )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'SubTotal'          i_val = |{ is_head-subtotal DECIMALS = 2 }|         CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Total'             i_val = |{ is_head-total DECIMALS = 2 }|            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Moneda'            i_val = CONV string( is_head-waers )                CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'TipoCambio'        i_val = |{ is_head-tipo_cambio DECIMALS = 5 }|      CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'LugarExpedicion'   i_val = CONV string( is_head-lugar_exp )            CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Version'           i_val = '4.0'                                        CHANGING cv_attr = lv_attr ).
+
+    " Abrir nodo <cfdi:Comprobante>
+    me->append_line( EXPORTING iv_line = |<cfdi:Comprobante { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+
+
+
+    " Nodo <cfdi:Emisor>
+    CLEAR lv_attr.
+    me->add_attr( EXPORTING i_name = 'Nombre'        i_val = CONV string( is_head-nombre_emisor ) CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Rfc'           i_val = CONV string( is_head-rfc_emisor )    CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'RegimenFiscal' i_val = CONV string( is_head-regimen_fiscal ) CHANGING cv_attr = lv_attr ).
+    me->append_line( EXPORTING iv_line = |<cfdi:Emisor { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+    me->append_line( EXPORTING iv_line = '</cfdi:Emisor>' CHANGING ct_xml = ct_xml ).
+
+    " Nodo <cfdi:Receptor>
+    CLEAR lv_attr.
+    me->add_attr( EXPORTING i_name = 'Nombre'                   i_val = CONV string( lv_nombre ) CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'Rfc'                      i_val = CONV string( is_head-rfc_receptor )    CHANGING cv_attr = lv_attr ).
+    me->add_attr( EXPORTING i_name = 'RegimenFiscalReceptor'   i_val = CONV string( lv_regfiscal )  CHANGING cv_attr = lv_attr ).
+    DATA(lv_lugar_exp) = |{ CONV i( is_head-lugar_exp ) }|.
+    me->add_attr( EXPORTING i_name = 'DomicilioFiscalReceptor' i_val = lv_domfiscal      CHANGING cv_attr = lv_attr ).
+
+
+    me->add_attr( EXPORTING i_name = 'UsoCFDI'                 i_val = CONV string( lv_usocfdi )         CHANGING cv_attr = lv_attr ).
+    me->append_line( EXPORTING iv_line = |<cfdi:Receptor { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+    me->append_line( EXPORTING iv_line = '</cfdi:Receptor>' CHANGING ct_xml = ct_xml ).
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_CFDI40_NAST->BUILD_CONCEPTOS
+* +-------------------------------------------------------------------------------------------------+
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_conceptos.
+    CONSTANTS:
+              c_01(2) VALUE '01',
+              c_02(2) VALUE '02'.
+
+    DATA: lt_conver TYPE STANDARD TABLE OF zequival_40,
+          lw_conver TYPE zequival_40,
+          lv_attr   TYPE string,
+          objetoimp TYPE string.
+
+    FIELD-SYMBOLS: <fs_det> TYPE zet_det_mgs.
+
+    " Recuperar equivalencias
+    SELECT * FROM zequival_40 INTO CORRESPONDING FIELDS OF TABLE lt_conver.
+    IF lt_conver IS INITIAL OR mt_det IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    SORT lt_conver BY zmaterial.
+
+    " Abrir nodo <cfdi:Conceptos>
+    me->append_line( EXPORTING iv_line = '<cfdi:Conceptos>' CHANGING ct_xml = ct_xml ).
+
+    LOOP AT mt_det ASSIGNING <fs_det>.
+      CLEAR lv_attr.
+
+      " Buscar equivalencia por material
+      READ TABLE lt_conver INTO lw_conver WITH KEY zmaterial = <fs_det>-prod_eka BINARY SEARCH.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+
+      " Atributos del concepto
+      me->add_attr( EXPORTING i_name = 'ClaveProdServ'   i_val = CONV string( lw_conver-clave_sat )     CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Cantidad'        i_val = |{ <fs_det>-cantidad DECIMALS = 2 }|   CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'ClaveUnidad'     i_val = CONV string( lw_conver-unidad_sat )    CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Descripcion'     i_val = CONV string( lw_conver-descrip )       CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'ValorUnitario'   i_val = |{ <fs_det>-valor_unit DECIMALS = 2 }| CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Importe'         i_val = |{ <fs_det>-valor_unit * <fs_det>-cantidad DECIMALS = 2 }| CHANGING cv_attr = lv_attr ).
+      IF <fs_det>-importe_iva > 0.
+        CLEAR objetoimp.
+        objetoimp = c_02.
+      ELSE.
+        objetoimp = c_01.
+      ENDIF.
+
+      me->add_attr( EXPORTING i_name = 'ObjetoImp'       i_val = objetoimp CHANGING cv_attr = lv_attr ).
+
+      " Abrir nodo <cfdi:Concepto>
+      me->append_line( EXPORTING iv_line = |<cfdi:Concepto { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+
+      " Nodo <cfdi:Impuestos> por concepto
+      me->append_line( EXPORTING iv_line = '<cfdi:Impuestos>' CHANGING ct_xml = ct_xml ).
+      me->append_line( EXPORTING iv_line = '<cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+
+      CLEAR lv_attr.
+      me->add_attr( EXPORTING i_name = 'Base'        i_val = |{ <fs_det>-importe_iva DECIMALS = 2 }| CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Impuesto'    i_val = '002' CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'TipoFactor'  i_val = 'Tasa' CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'TasaOCuota'  i_val = '0.160000' CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Importe'     i_val = |{ <fs_det>-importe_iva DECIMALS = 2 }| CHANGING cv_attr = lv_attr ).
+
+      me->empty_attr( EXPORTING iv_tag = 'cfdi:Traslado' iv_attr = lv_attr CHANGING ct_xml = ct_xml ).
+
+      me->append_line( EXPORTING iv_line = '</cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+      me->append_line( EXPORTING iv_line = '</cfdi:Impuestos>' CHANGING ct_xml = ct_xml ).
+
+      " Cierre del concepto
+      me->append_line( EXPORTING iv_line = '</cfdi:Concepto>' CHANGING ct_xml = ct_xml ).
+    ENDLOOP.
+
+    " Cierre nodo <cfdi:Conceptos>
+    me->append_line( EXPORTING iv_line = '</cfdi:Conceptos>' CHANGING ct_xml = ct_xml ).
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_CFDI40_NAST->BUILD_IMPUESTOS_TOTALES
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZET_HEAD_40
+* | [--->] IV_VERSION                     TYPE        CHAR4
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_impuestos_totales.
+
+    DATA: lv_attr    TYPE string,
+          lv_importe TYPE string,
+          lv_base    TYPE string.
+
+    CLEAR: lv_attr, lv_importe, lv_base.
+
+    " Validar que haya impuestos trasladados
+    IF iv_version = '4.0' AND is_head-total_iva > 0.
+
+      " TotalImpuestosTrasladados
+      lv_importe = |{ is_head-total_iva DECIMALS = 2 }|.
+      me->add_attr( EXPORTING i_name = 'TotalImpuestosTrasladados'
+                              i_val  = lv_importe
+                              CHANGING cv_attr = lv_attr ).
+
+      " Abrir nodo <cfdi:Impuestos>
+      me->append_line( EXPORTING iv_line = |<cfdi:Impuestos { lv_attr }>| && '>' CHANGING ct_xml = ct_xml ).
+
+      " Nodo <cfdi:Traslados>
+      me->append_line( EXPORTING iv_line = '<cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+
+      " Atributos del traslado
+      lv_base = |{ is_head-subtotal DECIMALS = 2 }|.
+
+      CLEAR lv_attr.
+      me->add_attr( EXPORTING i_name = 'Base'        i_val = lv_base      CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Impuesto'    i_val = '002'        CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'TipoFactor'  i_val = 'Tasa'       CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'TasaOCuota'  i_val = '0.160000'   CHANGING cv_attr = lv_attr ).
+      me->add_attr( EXPORTING i_name = 'Importe'     i_val = lv_importe   CHANGING cv_attr = lv_attr ).
+
+      " Nodo vacío <cfdi:Traslado ... />
+      me->empty_attr( EXPORTING iv_tag = 'cfdi:Traslado' iv_attr = lv_attr CHANGING ct_xml = ct_xml ).
+
+      " Cierre de nodos
+      me->append_line( EXPORTING iv_line = '</cfdi:Traslados>' CHANGING ct_xml = ct_xml ).
+      me->append_line( EXPORTING iv_line = '</cfdi:Impuestos>' CHANGING ct_xml = ct_xml ).
+
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->BUILD_XML
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_HEAD                        TYPE        ZET_HEAD_40
+* | [<-()] RV_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD build_xml.
+
+    DATA: lv_xml  TYPE string,
+          ls_head TYPE zet_head_40.
+
+    " Copiar datos para validación
+    ls_head = is_head.
+
+    " Validar folio
+    IF ls_head-folio_xml IS INITIAL.
+*      ls_head-folio_xml = |SIN_FOLIO_{ sy-datum }|.
+      ls_head-folio_xml = |SIN_ID_{ sy-datum }_{ sy-uname }|.
+    ENDIF.
+
+    " Cabecera
+    me->build_cabecera(
+      EXPORTING is_head = ls_head
+      CHANGING  ct_xml  = lv_xml
+    ).
+
+    " Conceptos
+    me->build_conceptos( CHANGING ct_xml = lv_xml ).
+
+    " Impuestos totales
+    me->build_impuestos_totales(
+      EXPORTING
+        is_head    = ls_head
+        iv_version = '4.0'
+      CHANGING
+        ct_xml     = lv_xml
+    ).
+
+    " Cierre del comprobante
+    me->append_line( EXPORTING iv_line = '</cfdi:Comprobante>' CHANGING ct_xml = lv_xml ).
+
+    " Retornar XML completo
+    me->sanitizar_xml_final( CHANGING ct_xml = lv_xml ).
+
+    rv_xml = lv_xml.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_CFDI40_NAST->CALL_TIMBRADO
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] I_XML                          TYPE        STRING
+* | [<---] E_UUID                         TYPE        ZUUID
+* | [<---] E_URL                          TYPE        ZQR40
+* | [EXC!] CX_CFDI_ERROR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD call_timbrado.
+    " Aquí llamarías al servicio de timbrado SAT o PAC
+    " Retornarías UUID y URL
+    e_uuid = 'FAKE-UUID-1234'.
+    e_url  = 'https://fake.url/xml/FAKE-UUID-1234'.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_CFDI40_NAST->CLOSE_TAG
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TAG                         TYPE        STRING
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD close_tag.
+    DATA lv TYPE string.
+    CONCATENATE '</' iv_tag '>' INTO lv.
+    me->append_line( EXPORTING iv_line = lv CHANGING ct_xml = ct_xml ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->CONSTRUCTOR
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD constructor.
+    " Sin inicialización especial
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_CFDI40_NAST->EMPTY_ATTR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TAG                         TYPE        STRING
+* | [--->] IV_ATTR                        TYPE        STRING
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD empty_attr.
+    ct_xml = ct_xml && |<{ iv_tag } { iv_attr }/>| && cl_abap_char_utilities=>newline.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->GENERATE
+* +-------------------------------------------------------------------------------------------------+
+* | [<---] E_UUID                         TYPE        ZUUID
+* | [<---] E_URL                          TYPE        ZQR40
+* | [EXC!] CX_CFDI_ERROR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD generate.
+*    DATA(lv_xml) = build_xml( ).
+*    call_timbrado( EXPORTING i_xml = lv_xml
+*                   IMPORTING e_uuid = e_uuid
+*                             e_url  = e_url ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->GET_XML_SAT_SAP
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] T_HEAD_CFDI                    TYPE        ZST_HEAD_40
+* | [--->] T_DET_CFDI                     TYPE        ZST_DET_40
+* | [--->] I_ADDENDA                      TYPE        CHAR1
+* | [--->] I_PEDIDO                       TYPE        VBELN_VA
+* | [<---] E_UUID                         TYPE        ZUUID
+* | [<---] E_ERROR                        TYPE        STRING
+* | [<---] E_URL                          TYPE        ZQR40
+* | [<-->] PO_LOGGER                      TYPE REF TO ZCL_LOGGER(optional)
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_xml_sat_sap.
+    " Inicialización de valores
+    CLEAR: e_uuid, e_error, e_url.
+
+    " Validación básica
+    IF t_head_cfdi IS INITIAL OR t_det_cfdi IS INITIAL.
+      e_error = 'Datos CFDI incompletos'.
+      RETURN.
+    ENDIF.
+
+    " Cargar datos en atributos internos
+    me->set_data(
+      EXPORTING
+      t_head_cfdi = t_head_cfdi
+      t_det_cfdi  = t_det_cfdi
+
+      i_pedido    = i_pedido
+    ).
+
+    " Generar XML y obtener UUID/URL
+    TRY.
+        me->generate(
+          IMPORTING
+            e_uuid = e_uuid
+            e_url  = e_url
+        ).
+      CATCH cx_sy_conversion_error INTO DATA(lx_error).
+        e_error = lx_error->get_text( ).
+    ENDTRY.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->OPEN_TAG
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TAG                         TYPE        STRING
+* | [--->] IV_ATTR                        TYPE        STRING
+* | [<-->] CT_XML                         TYPE        ANY TABLE
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD open_tag.
+    DATA lv TYPE string.
+    DATA la TYPE string.
+    la = me->trim( iv_attr ).
+    CONCATENATE '<' iv_tag INTO lv.
+    IF la IS NOT INITIAL.
+      CONCATENATE lv la INTO lv SEPARATED BY space.
+    ENDIF.
+    CONCATENATE lv '>' INTO lv.
+*    me->append_line( EXPORTING iv_line = lv CHANGING ct_xml = ct_xml ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->RECUPERAR_DATOS_CFDI_RECEPTOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_KUNNR                       TYPE        KUNNR
+* | [<---] EV_METPAG                      TYPE        STRING
+* | [<---] EV_USOCFDI                     TYPE        STRING
+* | [<---] EV_NOMBRE                      TYPE        STRING
+* | [<---] EV_REGFISCAL                   TYPE        STRING
+* | [<---] EV_DOMFISCAL                   TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD recuperar_datos_cfdi_receptor.
+
+
+    DATA: lv_zterm   TYPE knvv-zterm,
+          lv_katr6   TYPE kna1-katr6,
+          lv_name1   TYPE kna1-name1,
+          lv_pstlz   TYPE kna1-pstlz,
+          lv_usocfdi TYPE knvv-kvgr1.
+
+    " Recuperar método de pago desde KNVV
+    SELECT SINGLE zterm kvgr1
+      INTO (lv_zterm  , lv_usocfdi)
+      FROM knvv
+      WHERE kunnr = iv_kunnr.
+
+    " Recuperar uso CFDI y nombre desde KNA1
+    SELECT SINGLE pstlz katr6 name1
+      INTO (lv_pstlz , lv_katr6, lv_name1)
+      FROM kna1
+      WHERE kunnr = iv_kunnr.
+
+
+
+    " Asignar resultados
+    ev_metpag    = lv_zterm.
+    ev_usocfdi   = lv_usocfdi.
+    ev_nombre    = lv_name1.
+    ev_regfiscal = lv_katr6.
+    ev_domfiscal = lv_pstlz.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->SANITIZAR_XML_FINAL
+* +-------------------------------------------------------------------------------------------------+
+* | [<-->] CT_XML                         TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD sanitizar_xml_final.
+
+    " Elimina cierres duplicados como >> que pueden invalidar el XML
+    REPLACE ALL OCCURRENCES OF '>>' IN ct_xml WITH '>'.
+
+    " Elimina espacios innecesarios antes de cierre de etiquetas
+    REPLACE ALL OCCURRENCES OF ' >' IN ct_xml WITH '>'.
+
+    " Opcional: eliminar saltos de línea dobles si el PAC lo requiere
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline && cl_abap_char_utilities=>newline
+      IN ct_xml WITH cl_abap_char_utilities=>newline.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->SET_DATA
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] T_HEAD_CFDI                    TYPE        ZST_HEAD_40
+* | [--->] T_DET_CFDI                     TYPE        ZST_DET_40
+* | [--->] I_PEDIDO                       TYPE        VBELN_VA
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD set_data.
+    mt_head    = t_head_cfdi.
+*    mt_det     = t_det_cfdi.
+    mt_det = VALUE #( FOR ls IN t_det_cfdi
+                  ( CORRESPONDING zet_det_mgs( ls ) ) ).
+    mv_pedido  = i_pedido.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_CFDI40_NAST->TRIM
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TEXT                        TYPE        ANY
+* | [<-()] RV_TEXT                        TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD trim.
+    DATA lv TYPE string.
+    lv = iv_text.
+    SHIFT lv LEFT  DELETING LEADING space.
+    SHIFT lv RIGHT DELETING TRAILING space.
+    rv_text = lv.
+  ENDMETHOD.
+ENDCLASS.

@@ -1,0 +1,240 @@
+METHOD build_cabecera.
+  DATA: lv_attr        TYPE string,
+        lv_fecha       TYPE string,
+        lv_metpag      TYPE string,
+        lv_usocfdi     TYPE string,
+        lv_nombre      TYPE string,
+        lv_regfiscal_r TYPE string,
+        lv_domfiscal   TYPE string,
+        lv_exportacion TYPE string,
+        lv_tc_str      TYPE string,
+        lv_cp_emisor   TYPE adrc-post_code1,
+        lv_formapago   TYPE string.
+
+  " === Fecha CFDI 4.0 → AAAA-MM-DDThh:mm:ss
+  lv_fecha = |{ sy-datum+0(4) }-{ sy-datum+4(2) }-{ sy-datum+6(2) }T{ sy-uzeit+0(2) }:{ sy-uzeit+2(2) }:{ sy-uzeit+4(2) }|.
+
+  " === Receptor (catálogos SAT) – con datos mínimos
+  me->recuperar_datos_cfdi_receptor(
+    EXPORTING iv_kunnr     = is_head-kunnr
+    IMPORTING ev_metpag    = lv_metpag
+              ev_formapago = lv_formapago
+              ev_usocfdi   = lv_usocfdi
+              ev_nombre    = lv_nombre
+              ev_regfiscal = lv_regfiscal_r
+              ev_domfiscal = lv_domfiscal ).
+
+  " === Exportación requerido en 4.0; default '01'
+  lv_exportacion = COND string( WHEN is_head-exportacion IS INITIAL THEN '01'
+                                ELSE CONV string( is_head-exportacion ) ).
+
+  " === LugarExpedicion (CP emisor)
+  CLEAR lv_cp_emisor.
+  IF is_head-bukrs IS NOT INITIAL.
+    SELECT SINGLE a~post_code1
+      INTO lv_cp_emisor
+      FROM t001 AS t
+      INNER JOIN adrc AS a ON a~addrnumber = t~adrnr
+      WHERE t~bukrs = is_head-bukrs.
+  ENDIF.
+  IF lv_cp_emisor IS INITIAL.
+    lv_cp_emisor = CONV adrc-post_code1( is_head-lugar_exp ).
+  ENDIF.
+  REPLACE ALL OCCURRENCES OF REGEX '[^0-9]' IN lv_cp_emisor WITH ''.
+  IF strlen( lv_cp_emisor ) = 4.
+    lv_cp_emisor = |0{ lv_cp_emisor }|.
+  ELSEIF strlen( lv_cp_emisor ) > 5.
+    lv_cp_emisor = lv_cp_emisor(5).
+  ENDIF.
+
+  " === Decimales de moneda
+  DATA lv_curr_dec TYPE i VALUE 2.
+  FIELD-SYMBOLS <fs_waers> TYPE any.
+  ASSIGN COMPONENT 'WAERS' OF STRUCTURE is_head TO <fs_waers>.
+  IF <fs_waers> IS ASSIGNED AND <fs_waers> IS NOT INITIAL.
+    SELECT SINGLE currdec INTO lv_curr_dec FROM tcurx WHERE currkey = <fs_waers>.
+    IF sy-subrc <> 0 OR lv_curr_dec IS INITIAL. lv_curr_dec = 2. ENDIF.
+  ENDIF.
+
+  " === TipoCambio: sólo si moneda <> MXN
+  CLEAR lv_tc_str.
+  IF is_head-waers IS NOT INITIAL AND is_head-waers <> 'MXN'.
+    lv_tc_str = |{ is_head-tipo_cambio DECIMALS = 6 }|.
+    REPLACE ALL OCCURRENCES OF ',' IN lv_tc_str WITH '.'.
+  ENDIF.
+
+  " === Recalcular SubTotal e IVA TOTAL desde mt_det (mismas reglas que conceptos)
+  DATA: lv_subtotal_p   TYPE p LENGTH 16 DECIMALS 2 VALUE 0,
+        lv_tras_total_p TYPE p LENGTH 16 DECIMALS 2 VALUE 0.
+
+  DATA: lv_last_vbeln TYPE vbrk-vbeln,
+        lv_last_knumv TYPE konv-knumv.
+
+  TYPES: BEGIN OF ty_mlan_cache, matnr TYPE matnr, taxm1 TYPE mlan-taxm1, END OF ty_mlan_cache.
+  DATA: lt_mlan_cache TYPE HASHED TABLE OF ty_mlan_cache WITH UNIQUE KEY matnr,
+        ls_mlan_cache TYPE ty_mlan_cache.
+
+  FIELD-SYMBOLS:
+    <d>        TYPE any,
+    <f_qty>    TYPE any,   <f_unit>   TYPE any, <f_amt>   TYPE any,
+    <f_tasa>   TYPE any,   <f_kpein>  TYPE any,
+    <f_posnr>  TYPE any,   <f_vbeln>  TYPE any, <f_matnr> TYPE any,
+    <f_ivap>   TYPE any,   <f_ivapct> TYPE any, <f_objimp> TYPE any.
+
+  DATA: lv_qty     TYPE decfloat34,
+        lv_unitp   TYPE decfloat34,
+        lv_amt_in  TYPE decfloat34,
+        lv_tasa    TYPE decfloat34,
+        lv_kpein   TYPE decfloat34,
+        lv_base_p  TYPE p LENGTH 16 DECIMALS 2,
+        lv_iva_p   TYPE p LENGTH 16 DECIMALS 2.
+
+  DATA: lt_konv_pos TYPE STANDARD TABLE OF konv WITH DEFAULT KEY,
+        ls_konv     TYPE konv,
+        lv_kw       TYPE decfloat34,
+        lv_ka       TYPE decfloat34.
+
+  LOOP AT mt_det ASSIGNING <d>.
+    UNASSIGN: <f_qty>,<f_unit>,<f_amt>,<f_tasa>,<f_kpein>,<f_posnr>,<f_vbeln>,<f_matnr>,<f_ivap>,
+    <f_ivapct>,<f_objimp>.
+    ASSIGN COMPONENT 'CANTIDAD'       OF STRUCTURE <d> TO <f_qty>.  IF <f_qty>  IS NOT ASSIGNED. ASSIGN COMPONENT 'FKIMG'  OF STRUCTURE <d> TO <f_qty>.  ENDIF.
+    ASSIGN COMPONENT 'VALOR_UNITARIO' OF STRUCTURE <d> TO <f_unit>. IF <f_unit> IS NOT ASSIGNED. ASSIGN COMPONENT 'VALOR_UNIT' OF STRUCTURE <d> TO <f_unit>. ENDIF.
+    IF <f_unit> IS NOT ASSIGNED. ASSIGN COMPONENT 'PUNIT'  OF STRUCTURE <d> TO <f_unit>. ENDIF.
+    IF <f_unit> IS NOT ASSIGNED. ASSIGN COMPONENT 'KBETR'  OF STRUCTURE <d> TO <f_unit>. ENDIF.
+    ASSIGN COMPONENT 'IMPORTE'        OF STRUCTURE <d> TO <f_amt>.  IF <f_amt>  IS NOT ASSIGNED. ASSIGN COMPONENT 'DMBTR'  OF STRUCTURE <d> TO <f_amt>.  ENDIF.
+    ASSIGN COMPONENT 'KPEIN'          OF STRUCTURE <d> TO <f_kpein>.
+    ASSIGN COMPONENT 'TASAOCUOTA'     OF STRUCTURE <d> TO <f_tasa>. IF <f_tasa> IS NOT ASSIGNED. ASSIGN COMPONENT 'TASA' OF STRUCTURE <d> TO <f_tasa>. ENDIF.
+    ASSIGN COMPONENT 'POSNR'          OF STRUCTURE <d> TO <f_posnr>.
+    ASSIGN COMPONENT 'VBELN'          OF STRUCTURE <d> TO <f_vbeln>.
+    ASSIGN COMPONENT 'MATNR'          OF STRUCTURE <d> TO <f_matnr>.
+    ASSIGN COMPONENT 'IMPORTE_IVA'    OF STRUCTURE <d> TO <f_ivap>.
+    ASSIGN COMPONENT 'IVA_PORCENTAJE' OF STRUCTURE <d> TO <f_ivapct>.
+    ASSIGN COMPONENT 'OBJETOIMP'      OF STRUCTURE <d> TO <f_objimp>.
+
+    CLEAR: lv_qty, lv_unitp, lv_amt_in, lv_tasa.
+    IF <f_qty>  IS ASSIGNED AND <f_qty>  IS NOT INITIAL. lv_qty    = CONV decfloat34( <f_qty>  ). ENDIF.
+    IF <f_unit> IS ASSIGNED AND <f_unit> IS NOT INITIAL. lv_unitp  = CONV decfloat34( <f_unit> ). ENDIF.
+    IF <f_amt>  IS ASSIGNED AND <f_amt>  IS NOT INITIAL. lv_amt_in = CONV decfloat34( <f_amt>  ). ENDIF.
+    IF <f_kpein> IS ASSIGNED AND <f_kpein> IS NOT INITIAL.
+      lv_kpein = CONV decfloat34( <f_kpein> ).
+      IF lv_kpein > 0. lv_unitp = lv_unitp / lv_kpein. ENDIF.
+    ENDIF.
+
+    " base: qty*unit; si queda 0 usar importe de línea
+    lv_base_p = lv_qty * lv_unitp.
+    IF lv_base_p = 0 AND lv_amt_in > 0. lv_base_p = lv_amt_in. ENDIF.
+
+    " tasa priorizando IVA_PORCENTAJE
+    IF <f_ivapct> IS ASSIGNED AND <f_ivapct> IS NOT INITIAL.
+      lv_tasa = CONV decfloat34( <f_ivapct> ).
+    ELSEIF <f_tasa> IS ASSIGNED AND <f_tasa> IS NOT INITIAL.
+      lv_tasa = CONV decfloat34( <f_tasa> ).
+    ELSE.
+      lv_tasa = 0.
+    ENDIF.
+    IF lv_tasa > 1 AND lv_tasa <= 100. lv_tasa = lv_tasa / 100. ENDIF.
+    IF lv_tasa < 0. lv_tasa = 0. ENDIF.
+
+    " exento por material? (MLAN)
+    DATA(lv_exento) = abap_false.
+    IF <f_matnr> IS ASSIGNED AND <f_matnr> IS NOT INITIAL.
+      ls_mlan_cache-matnr = <f_matnr>.
+      READ TABLE lt_mlan_cache INTO ls_mlan_cache WITH TABLE KEY matnr = ls_mlan_cache-matnr.
+      IF sy-subrc <> 0.
+        DATA lv_matnr_db TYPE matnr.
+        lv_matnr_db = <f_matnr>.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING input  = lv_matnr_db
+          IMPORTING output = lv_matnr_db.
+        SELECT SINGLE taxm1 INTO ls_mlan_cache-taxm1 FROM mlan WHERE matnr = lv_matnr_db AND aland = 'MX'.
+        IF sy-subrc = 0. INSERT ls_mlan_cache INTO TABLE lt_mlan_cache. ENDIF.
+      ENDIF.
+      IF ls_mlan_cache-taxm1 = '0' OR ls_mlan_cache-taxm1 IS INITIAL. lv_exento = abap_true. ENDIF.
+    ENDIF.
+
+    " respeta OBJETOIMP si viene informado
+    IF <f_objimp> IS ASSIGNED AND <f_objimp> = '01'.
+      lv_exento = abap_true.
+    ENDIF.
+
+    CLEAR lv_iva_p.
+    IF lv_exento = abap_true.
+      lv_iva_p = 0.
+    ELSEIF lv_tasa > 0.
+      lv_iva_p = lv_base_p * lv_tasa.
+    ELSEIF <f_ivap> IS ASSIGNED AND <f_ivap> IS NOT INITIAL AND lv_base_p > 0.
+      lv_iva_p = CONV decfloat34( <f_ivap> ).
+    ENDIF.
+
+    IF lv_base_p > 0.
+      lv_subtotal_p   = lv_subtotal_p   + lv_base_p.
+      lv_tras_total_p = lv_tras_total_p + lv_iva_p.
+    ENDIF.
+  ENDLOOP.
+
+  " === Formateo SubTotal/Total
+  DATA(lv_subt_str) = |{ CONV decfloat34( lv_subtotal_p ) DECIMALS = lv_curr_dec }|.
+  DATA(lv_tot_str)  = |{ CONV decfloat34( lv_subtotal_p + lv_tras_total_p ) DECIMALS = lv_curr_dec }|.
+  REPLACE ALL OCCURRENCES OF ',' IN lv_subt_str WITH '.'.
+  REPLACE ALL OCCURRENCES OF ',' IN lv_tot_str  WITH '.'.
+
+  " === Datos del emisor
+  DATA: lv_nom_emisor TYPE string,
+        lv_reg_fiscal TYPE string,
+        lv_version    TYPE string.
+
+  lv_nom_emisor = me->get_param_value( iv_program = 'ZCFDI40_MONITOR_LOG' iv_param = 'EMISOR' iv_field = 'NOMBRE'         iv_bukrs = is_head-bukrs ).
+  IF lv_nom_emisor IS INITIAL.
+    SELECT SINGLE butxt INTO lv_nom_emisor FROM t001 WHERE bukrs = is_head-bukrs.
+  ENDIF.
+  lv_reg_fiscal = me->get_param_value( iv_program = 'ZCFDI40_MONITOR_LOG' iv_param = 'EMISOR' iv_field = 'REGIMENFISCAL'   iv_bukrs = is_head-bukrs ).
+  lv_version    = me->get_param_value( iv_program = 'ZCFDI40_MONITOR_LOG' iv_param = 'CFDI'   iv_field = 'VERSION'         iv_bukrs = is_head-bukrs ).
+  IF lv_version IS INITIAL. lv_version = '4.0'. ENDIF.
+
+  " === Atributos de <cfdi:Comprobante>
+  CLEAR lv_attr.
+  me->add_attr( EXPORTING i_name = 'xsi:schemaLocation' i_val = 'http://www.sat.gob.mx/cfd/4 http://www.sat.gob.mx/sitio_internet/cfd/4/cfdv40.xsd' CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'xmlns:xsi'          i_val = 'http://www.w3.org/2001/XMLSchema-instance' CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'xmlns:cfdi'         i_val = 'http://www.sat.gob.mx/cfd/4'                CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Version'            i_val = lv_version                                   CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Fecha'              i_val = lv_fecha                                     CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Exportacion'        i_val = lv_exportacion                               CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'TipoDeComprobante'  i_val = CONV string( is_head-tipo_comp )             CHANGING cv_attr = lv_attr ).
+  IF is_head-serie_xml IS NOT INITIAL.
+    me->add_attr( EXPORTING i_name = 'Serie'            i_val = CONV string( is_head-serie_xml )             CHANGING cv_attr = lv_attr ).
+  ENDIF.
+  me->add_attr( EXPORTING i_name = 'Folio'              i_val = CONV string( is_head-belnr )                 CHANGING cv_attr = lv_attr ).
+
+  IF is_head-metodo_pago IS NOT INITIAL.
+    me->add_attr( EXPORTING i_name = 'MetodoPago' i_val = CONV string( is_head-metodo_pago ) CHANGING cv_attr = lv_attr ).
+    IF is_head-metodo_pago = 'PUE' AND lv_formapago IS NOT INITIAL.
+      me->add_attr( EXPORTING i_name = 'FormaPago'  i_val = lv_formapago CHANGING cv_attr = lv_attr ).
+    ENDIF.
+  ENDIF.
+
+  me->add_attr( EXPORTING i_name = 'SubTotal'        i_val = lv_subt_str               CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Total'           i_val = lv_tot_str                CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Moneda'          i_val = CONV string( is_head-waers ) CHANGING cv_attr = lv_attr ).
+  IF lv_tc_str IS NOT INITIAL.
+    me->add_attr( EXPORTING i_name = 'TipoCambio'    i_val = lv_tc_str                 CHANGING cv_attr = lv_attr ).
+  ENDIF.
+  me->add_attr( EXPORTING i_name = 'LugarExpedicion' i_val = CONV string( lv_cp_emisor ) CHANGING cv_attr = lv_attr ).
+
+  me->append_line( EXPORTING iv_line = |<cfdi:Comprobante { lv_attr }>| CHANGING ct_xml = ct_xml ).
+
+  " Emisor
+  CLEAR lv_attr.
+  me->add_attr( EXPORTING i_name = 'Nombre'        i_val = lv_nom_emisor                  CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Rfc'           i_val = CONV string( is_head-rfc_emisor ) CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'RegimenFiscal' i_val = lv_reg_fiscal                   CHANGING cv_attr = lv_attr ).
+  me->append_line( EXPORTING iv_line = |<cfdi:Emisor { lv_attr }/>| CHANGING ct_xml = ct_xml ).
+
+  " Receptor
+  CLEAR lv_attr.
+  me->add_attr( EXPORTING i_name = 'Nombre'                  i_val = lv_nombre                           CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'Rfc'                     i_val = CONV string( is_head-rfc_receptor ) CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'RegimenFiscalReceptor'   i_val = lv_regfiscal_r                      CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'DomicilioFiscalReceptor' i_val = lv_domfiscal                        CHANGING cv_attr = lv_attr ).
+  me->add_attr( EXPORTING i_name = 'UsoCFDI'                 i_val = lv_usocfdi                          CHANGING cv_attr = lv_attr ).
+  me->append_line( EXPORTING iv_line = |<cfdi:Receptor { lv_attr }/>| CHANGING ct_xml = ct_xml ).
+ENDMETHOD.

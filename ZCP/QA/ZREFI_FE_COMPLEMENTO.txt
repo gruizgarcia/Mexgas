@@ -1,0 +1,75 @@
+REPORT zrefi_fe_complemento.
+TABLES sscrfields.
+
+"=== Banderas globales ===
+DATA gv_cancel           TYPE abap_bool VALUE abap_false.
+DATA gv_pbo_init_0100    TYPE abap_bool VALUE abap_false.
+DATA gv_need_popup       TYPE abap_bool VALUE abap_false.
+DATA gv_habilitar_campos TYPE abap_bool VALUE abap_false.
+
+" Nuevas banderas para salir limpio del ALV
+DATA gv_alv_user_exit    TYPE abap_bool VALUE abap_false.
+DATA gv_from_back        TYPE abap_bool VALUE abap_false.
+
+INCLUDE zrefi_fe_complemento_01. "Declaraciones
+INCLUDE zrefi_fe_complemento_02. "Rutinas
+
+"=== Eventos de la pantalla de selección ===
+AT SELECTION-SCREEN OUTPUT.
+  LOOP AT SCREEN.
+    PERFORM f_mod_screen.
+    MODIFY SCREEN.
+  ENDLOOP.
+
+AT SELECTION-SCREEN ON EXIT-COMMAND.
+  CASE sscrfields-ucomm.
+    WHEN 'BACK' OR 'EXIT' OR 'CANC'.
+      LEAVE PROGRAM.        " salir al menú SAP únicamente en estas 3
+    WHEN OTHERS.
+      RETURN.               " variantes, ayuda, etc. -> NO salgas
+  ENDCASE.
+
+
+AT SELECTION-SCREEN.
+  IF sscrfields-ucomm <> 'ONLI'.
+    RETURN.                 " solo F8 continúa al START-OF-SELECTION
+  ENDIF.
+
+
+"=== Inicio del reporte ===
+START-OF-SELECTION.
+
+  IF sy-batch = c_x.
+
+    PERFORM f_verif.
+    PERFORM f_verificar USING abap_false.
+    PERFORM f_emitir.
+
+  ELSE.
+
+    CLEAR: gv_from_back, gv_alv_user_exit, gv_cancel.
+
+    " 1) Carga previa
+    PERFORM f_verif.
+
+    " 2) Verificar (dentro se muestra el ALV)
+    PERFORM f_verificar USING abap_false.
+
+    " 3) Si el usuario salió del ALV con F3/F12/Exit/Back: cortar aquí
+    IF gv_alv_user_exit = abap_true OR gv_from_back = abap_true OR gv_cancel = abap_true.
+      CLEAR: gv_alv_user_exit, gv_from_back, gv_cancel.
+      LEAVE PROGRAM.   "o RETURN, según tu preferencia
+    ENDIF.
+
+    " 4) Emitir por botón (si aplica)
+*    PERFORM f_emitir_boton.
+
+  ENDIF.
+
+"=== Includes de módulos y lógicas ===
+INCLUDE zrefi_fe_complemento_statuso01.
+INCLUDE zrefi_fe_complemento_user_ci01.
+INCLUDE zrefi_fe_complemento_popup.
+
+
+INCLUDE zrefi_fe_complemento_logica.

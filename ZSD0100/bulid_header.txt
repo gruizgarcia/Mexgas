@@ -1,0 +1,68 @@
+METHOD build_header.
+
+  DATA: lv_fecha     TYPE string,
+        lv_tcambio   TYPE string.
+
+  " Fecha del comprobante
+  IF iv_fix_fecha = abap_true.
+    CALL FUNCTION 'ZCFDI_GET_TIMESTAMP'
+      IMPORTING ev_timestamp = lv_fecha.
+  ELSE.
+    lv_fecha = is_head-fechafact.
+  ENDIF.
+
+ IF is_head-tipo_cambio IS NOT INITIAL AND is_head-waers <> 'MXN'.
+  DATA: lv_tmp_c  TYPE c LENGTH 40,
+        lv_tc_p   TYPE ty_p14,
+        lv_tc_str TYPE string.
+
+  lv_tmp_c = is_head-tipo_cambio.
+  REPLACE ALL OCCURRENCES OF ',' IN lv_tmp_c WITH '.'.
+  CONDENSE lv_tmp_c NO-GAPS.
+
+  lv_tc_p = lv_tmp_c. " Conversión explícita a TY_P14
+  lv_tc_str = to_str( iv_val = lv_tc_p iv_dec = 6 ).
+
+  set_attr( node = mr_comp name = 'TipoCambio' value = lv_tc_str ).
+ENDIF.
+
+  " Nodo Comprobante
+  me->set_attr( node = mr_comp name = 'Version'           value = '4.0' ).
+  me->set_attr( node = mr_comp name = 'Fecha'             value = lv_fecha ).
+
+IF is_head-monedaxml IS NOT INITIAL.
+  me->set_attr( node = mr_comp name = 'Moneda' value = is_head-monedaxml ).
+ENDIF.
+
+  IF is_head-lugar_exp IS NOT INITIAL.
+    me->set_attr( node = mr_comp name = 'LugarExpedicion' value = is_head-lugar_exp ).
+  ENDIF.
+
+  IF is_head-tipo_cambio IS NOT INITIAL.
+    me->set_attr( node = mr_comp name = 'TipoCambio'      value = lv_tcambio ).
+  ENDIF.
+IF is_head-tipo_comp IS NOT INITIAL.
+  me->set_attr( node = mr_comp name = 'TipoDeComprobante' value = is_head-tipo_comp ).
+ENDIF.
+
+  IF is_head-exportacion IS NOT INITIAL.
+    me->set_attr( node = mr_comp name = 'Exportacion'     value = is_head-exportacion ).
+  ENDIF.
+
+  IF is_head-metodo_pago IS NOT INITIAL.
+    me->set_attr( node = mr_comp name = 'MetodoPago'      value = is_head-metodo_pago ).
+  ENDIF.
+
+  IF is_head-forma_pago IS NOT INITIAL.
+    me->set_attr( node = mr_comp name = 'FormaPago'       value = is_head-forma_pago ).
+  ENDIF.
+IF is_head-condiciones_pago IS NOT INITIAL.
+  me->set_attr( node = mr_comp name = 'CondicionesDePago' value = is_head-condiciones_pago ).
+ENDIF.
+
+  IF is_head-uso_cfdi IS NOT INITIAL.
+    me->set_attr( node = mr_comp name = 'UsoCFDI'         value = is_head-uso_cfdi ).
+    cv_uso_cfdi = is_head-uso_cfdi.
+  ENDIF.
+
+ENDMETHOD.

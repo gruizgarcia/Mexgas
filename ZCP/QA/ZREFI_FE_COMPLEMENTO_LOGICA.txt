@@ -1,0 +1,3532 @@
+*---------------------------------------------------------------------*
+*  INCLUDE ZREFI_FE_COMPLEMENTO_LOGICA                                *
+*  UPSERT ZTA1_CP1 + Plantilla "COMPLEMENTO DE PAGO TIMBRADO"         *
+*  Sin envío automático. Opción de abrir PDF vía ruta local.          *
+*---------------------------------------------------------------------*
+DATA: gv_temp_dir TYPE string.
+
+
+
+"====================== Constantes / Tipos ============================
+CONSTANTS: gc_icon_green TYPE zta1_cp1-estatus VALUE '@08@',
+           gc_icon_red   TYPE zta1_cp1-estatus VALUE '@0A@'.
+
+TYPES: BEGIN OF ty_cp1_success,
+         bukrs      TYPE zta1_cp1-bukrs,
+         kunnr      TYPE zta1_cp1-kunnr,
+         ztpago     TYPE zta1_cp1-ztpago,
+         anio_pago  TYPE zta1_cp1-anio_pago,
+         ztfactrel  TYPE zta1_cp1-ztfactrel,
+         anio_fac   TYPE zta1_cp1-anio_fac,
+         numcomp    TYPE zta1_cp1-numcomp,
+         estatus    TYPE zta1_cp1-estatus,
+         uuid_comp  TYPE zta1_cp1-uuid_comp,
+         ztfetimb   TYPE zta1_cp1-ztfetimb,
+         ruta_xml   TYPE zta1_cp1-ruta_xml,
+         ruta_pdf   TYPE zta1_cp1-ruta_pdf,
+         xml_dispon TYPE abap_bool,
+       END OF ty_cp1_success.
+
+"=== Mapa Complemento -> Póliza (para mensaje de éxito) ==============
+TYPES: BEGIN OF ty_cp_pol,
+         numcomp TYPE zta1_cp1-numcomp,
+         poliza  TYPE char35,
+       END OF ty_cp_pol.
+*
+DATA gt_cp_pol TYPE HASHED TABLE OF ty_cp_pol WITH UNIQUE KEY numcomp.
+
+"====================== Helpers de mapeo ==============================
+
+FORM f_set_from_sources
+  USING    iv_target_name   TYPE clike
+           iv_source_names  TYPE clike
+           cs_source        TYPE any
+  CHANGING cs_target        TYPE any.
+
+  FIELD-SYMBOLS: <ft> TYPE any, <fs> TYPE any.
+  DATA: lt_names TYPE STANDARD TABLE OF string,
+        lv_name  TYPE string.
+
+  ASSIGN COMPONENT iv_target_name OF STRUCTURE cs_target TO <ft>.
+  IF <ft> IS ASSIGNED.
+    SPLIT iv_source_names AT '|' INTO TABLE lt_names.
+    LOOP AT lt_names INTO lv_name.
+      IF lv_name IS INITIAL. CONTINUE. ENDIF.
+      ASSIGN COMPONENT lv_name OF STRUCTURE cs_source TO <fs>.
+      IF sy-subrc = 0 AND <fs> IS ASSIGNED AND <fs> IS NOT INITIAL.
+        <ft> = <fs>.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+ENDFORM.
+
+FORM f_copy_if_new
+  USING    iv_field_name TYPE clike
+           cs_source     TYPE any
+  CHANGING cs_target     TYPE any.
+
+  FIELD-SYMBOLS: <f_t> TYPE any, <f_s> TYPE any.
+  ASSIGN COMPONENT iv_field_name OF STRUCTURE cs_target TO <f_t>.
+  ASSIGN COMPONENT iv_field_name OF STRUCTURE cs_source TO <f_s>.
+  IF sy-subrc = 0 AND <f_t> IS ASSIGNED AND <f_s> IS ASSIGNED.
+    IF <f_s> IS NOT INITIAL AND <f_t> <> <f_s>.
+      <f_t> = <f_s>.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+"====================== Helpers dinámicos (nombres alternos) =========
+
+*---------------------------------------------------------------------*
+* Lee un campo por nombre alterno y lo devuelve en el tipo del caller *
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+* Lee un campo por nombre alterno y lo devuelve en el tipo del caller *
+*---------------------------------------------------------------------*
+FORM f_get_field_dyn_any
+  USING    cs_any   TYPE any
+           iv_names TYPE clike
+  CHANGING cv_value TYPE any.
+
+  FIELD-SYMBOLS: <f> TYPE any.
+  DATA: lt_names TYPE STANDARD TABLE OF string,
+        lv_name  TYPE string.
+
+  CLEAR cv_value.
+  SPLIT iv_names AT '|' INTO TABLE lt_names.
+  LOOP AT lt_names INTO lv_name.
+    IF lv_name IS INITIAL. CONTINUE. ENDIF.
+    ASSIGN COMPONENT lv_name OF STRUCTURE cs_any TO <f>.
+    IF sy-subrc = 0 AND <f> IS ASSIGNED AND <f> IS NOT INITIAL.
+      cv_value = <f>.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* f_get_field_dyn: lee un campo por nombres alternos y lo devuelve    *
+* en el tipo del parámetro real (usa TYPE any para evitar castings).  *
+*---------------------------------------------------------------------*
+FORM f_get_field_dyn
+  USING    cs_any   TYPE any
+           iv_names TYPE clike
+  CHANGING cv_value TYPE any.
+
+  FIELD-SYMBOLS: <f> TYPE any.
+  DATA: lt_names TYPE STANDARD TABLE OF string,
+        lv_name  TYPE string.
+
+  CLEAR cv_value.
+  SPLIT iv_names AT '|' INTO TABLE lt_names.
+  LOOP AT lt_names INTO lv_name.
+    IF lv_name IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    ASSIGN COMPONENT lv_name OF STRUCTURE cs_any TO <f>.
+    IF sy-subrc = 0 AND <f> IS ASSIGNED AND <f> IS NOT INITIAL.
+      cv_value = <f>.   " mueve en el tipo del caller (evita el string fijo)
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+
+FORM f_set_field_dyn
+  USING    iv_names TYPE clike
+           iv_value TYPE any
+  CHANGING cs_any   TYPE any.
+
+  FIELD-SYMBOLS: <f> TYPE any.
+  DATA: lt_names TYPE STANDARD TABLE OF string,
+        lv_name  TYPE string.
+
+  SPLIT iv_names AT '|' INTO TABLE lt_names.
+  LOOP AT lt_names INTO lv_name.
+    IF lv_name IS INITIAL. CONTINUE. ENDIF.
+    ASSIGN COMPONENT lv_name OF STRUCTURE cs_any TO <f>.
+    IF sy-subrc = 0 AND <f> IS ASSIGNED.
+      <f> = iv_value.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+"================== Adaptadores / Conversión / Popups =================
+
+FORM show_xml_popup_logica USING iv_xml_xstr TYPE xstring
+                                 iv_title    TYPE clike.
+  PERFORM show_xml_popup USING iv_xml_xstr iv_title.
+ENDFORM.
+
+FORM zconv_str_to_xstr USING    iv_str  TYPE clike
+                       CHANGING cv_xstr TYPE xstring.
+
+  DATA: lo_conv TYPE REF TO cl_abap_conv_out_ce,
+        lv_str  TYPE string.
+
+  CLEAR cv_xstr.
+  lv_str = iv_str.
+
+  TRY.
+      lo_conv = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
+      lo_conv->write( data = lv_str ).
+      " OJO: get_buffer retorna el xstring
+      cv_xstr = lo_conv->get_buffer( ).
+    CATCH cx_root.
+      CLEAR cv_xstr.
+  ENDTRY.
+
+ENDFORM.
+
+
+
+FORM zconv_xstr_to_str
+  USING    iv_xstr TYPE xstring
+  CHANGING cv_str  TYPE string.
+
+  DATA: lo_conv TYPE REF TO cl_abap_conv_in_ce.
+
+  CLEAR cv_str.
+  IF iv_xstr IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  TRY.
+      lo_conv = cl_abap_conv_in_ce=>create(
+                  input    = iv_xstr
+                  encoding = 'UTF-8' ).
+      lo_conv->read( IMPORTING data = cv_str ).
+    CATCH cx_root.
+      CLEAR cv_str.
+  ENDTRY.
+ENDFORM.
+
+"====================== Logger local ==================================
+
+FORM f_logger_ensure CHANGING co_logger TYPE REF TO zcl_logger.
+  CONSTANTS: lc_obj    TYPE balobj_d   VALUE 'ZCP',
+             lc_subobj TYPE balsubobj  VALUE 'PROCESS'.
+  DATA lv_extnumber TYPE char35.
+  IF co_logger IS INITIAL.
+    lv_extnumber = |CP-{ sy-uname }-{ sy-datum }{ sy-uzeit }|.
+    TRY.
+        CREATE OBJECT co_logger
+          EXPORTING
+            iv_extnumber = lv_extnumber
+            iv_object    = lc_obj
+            iv_subobject = lc_subobj
+            iv_repid     = sy-repid.
+      CATCH cx_root.
+        CLEAR co_logger.
+    ENDTRY.
+  ENDIF.
+ENDFORM.
+
+FORM f_add_log_errores_pac_loc
+  USING    iv_msgty TYPE symsgty
+           iv_msgid TYPE symsgid
+           iv_msgno TYPE symsgno
+           iv_msgv1 TYPE any
+           iv_msgv2 TYPE any
+           iv_msgv3 TYPE any
+           iv_msgv4 TYPE any
+  CHANGING co_logger TYPE REF TO zcl_logger.
+
+  PERFORM f_logger_ensure CHANGING co_logger.
+  IF co_logger IS INITIAL.
+    RETURN.
+  ENDIF.
+  TRY.
+      " co_logger->add_message( ... ).
+    CATCH cx_root.
+  ENDTRY.
+ENDFORM.
+
+"====================== Texto/Estatus =================================
+
+FORM f_fill_text_est
+  USING    iv_stat       TYPE zta1_cp1-estatus
+           iv_text_stat  TYPE clike
+  CHANGING cv_text_est   TYPE zta1_cp1-text_est.
+
+  DATA: lv_txt     TYPE string,
+        lv_stat_up TYPE string.
+
+  CLEAR cv_text_est.
+
+  IF iv_stat = gc_icon_green.
+    cv_text_est = 'Timbrado'.
+    RETURN.
+  ENDIF.
+
+  lv_txt = iv_text_stat.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf   IN lv_txt WITH space.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline IN lv_txt WITH space.
+  CONDENSE lv_txt.
+
+  lv_stat_up = iv_stat.
+  TRANSLATE lv_stat_up TO UPPER CASE.
+
+  IF lv_stat_up CS 'VERDE'.
+    IF lv_txt IS INITIAL.
+      cv_text_est = 'Timbrado'.
+    ELSE.
+      cv_text_est = lv_txt.
+    ENDIF.
+  ELSE.
+    IF lv_txt IS INITIAL.
+      cv_text_est = 'Error timbrado (PAC)'.
+    ELSE.
+      CONCATENATE 'Error PAC:' lv_txt INTO cv_text_est SEPARATED BY space.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+"====================== Plantilla de Éxito (EXTENDIDA) ================
+
+FORM f_build_success_template
+  USING    it_succ TYPE STANDARD TABLE
+  CHANGING ct_text TYPE soli_tab.
+
+  DATA: ls_text     TYPE soli,
+        lv_line     TYPE string,
+        lv_sep      TYPE string,
+        lv_avail    TYPE string,
+        lv_pol      TYPE char35,
+        lv_estok    TYPE string,
+        lv_xml_path TYPE string,
+        lv_pdf_path TYPE string.
+
+  CLEAR ct_text.
+  CLEAR lv_sep.
+  DO 78 TIMES.
+    CONCATENATE lv_sep '=' INTO lv_sep.
+  ENDDO.
+
+  ls_text-line = lv_sep.                                                   APPEND ls_text TO ct_text.
+  ls_text-line = |  COMPLEMENTO DE PAGO TIMBRADO  |.                       APPEND ls_text TO ct_text.
+  ls_text-line = lv_sep.                                                   APPEND ls_text TO ct_text.
+  ls_text-line = | |.                                                      APPEND ls_text TO ct_text.
+  ls_text-line = |Detalle por documento:|.                                 APPEND ls_text TO ct_text.
+  ls_text-line = | |.                                                      APPEND ls_text TO ct_text.
+
+  FIELD-SYMBOLS: <ls> TYPE ty_cp1_success.
+  LOOP AT it_succ ASSIGNING <ls>.
+    lv_line = |- Sociedad: { <ls>-bukrs }  Cliente: { <ls>-kunnr }  NumComp: { <ls>-numcomp }|.
+    ls_text-line = lv_line.                                                APPEND ls_text TO ct_text.
+
+    lv_line = |  Estatus: { <ls>-estatus }  UUID: { <ls>-uuid_comp }  Fecha Timb.: { <ls>-ztfetimb }|.
+    ls_text-line = lv_line.                                                APPEND ls_text TO ct_text.
+
+    IF <ls>-estatus = gc_icon_green.
+      lv_estok = 'OK'.
+    ELSE.
+      lv_estok = 'ERROR'.
+    ENDIF.
+    ls_text-line = |  Estatus Timbrado: { lv_estok }|.                     APPEND ls_text TO ct_text.
+
+    IF <ls>-xml_dispon = abap_true.  lv_avail = 'Disponible'. ELSE. lv_avail = 'No disponible'. ENDIF.
+    ls_text-line = |  XML: { lv_avail }|.                                  APPEND ls_text TO ct_text.
+
+    CLEAR: lv_xml_path, lv_pdf_path.
+    lv_xml_path = <ls>-ruta_xml.
+    lv_pdf_path = <ls>-ruta_pdf.
+    IF lv_xml_path IS NOT INITIAL.
+      PERFORM f_ensure_extension USING 'xml' CHANGING lv_xml_path.
+    ENDIF.
+    IF lv_pdf_path IS NOT INITIAL.
+      PERFORM f_ensure_extension USING 'pdf' CHANGING lv_pdf_path.
+    ENDIF.
+
+    IF lv_xml_path IS INITIAL AND lv_pdf_path IS INITIAL.
+      ls_text-line = |  Rutas -> XML: (N/A)  PDF: (N/A)|.
+    ELSE.
+      lv_line = |  Rutas -> XML: { lv_xml_path }  PDF: { lv_pdf_path }|.
+      ls_text-line = lv_line.
+    ENDIF.
+    APPEND ls_text TO ct_text.
+
+    PERFORM f_cp_pol_get USING <ls>-numcomp CHANGING lv_pol.
+    IF lv_pol IS NOT INITIAL.
+      ls_text-line = |  Actualización en Póliza: { lv_pol }|.              APPEND ls_text TO ct_text.
+    ENDIF.
+
+    ls_text-line = | |.                                                    APPEND ls_text TO ct_text.
+  ENDLOOP.
+
+  ls_text-line = lv_sep.                                                   APPEND ls_text TO ct_text.
+  ls_text-line = |Nota: Puede abrir los PDF ahora o más tarde desde la opción de visualización.|. APPEND ls_text TO ct_text.
+  ls_text-line = lv_sep.                                                   APPEND ls_text TO ct_text.
+ENDFORM.
+
+FORM f_show_success_template USING it_text TYPE soli_tab.
+  DATA ls_text TYPE soli.
+  NEW-PAGE.
+  LOOP AT it_text INTO ls_text.
+    WRITE: / ls_text-line.
+  ENDLOOP.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Abrir PDFs sin preguntar (elimina popup)                            *
+*---------------------------------------------------------------------*
+FORM f_prompt_send_decision CHANGING cv_send_now TYPE abap_bool.
+  cv_send_now = abap_true.
+ENDFORM.
+
+"====================== XML: parseo de campos CFDI ====================
+
+FORM f_parse_cfdi_fields_str
+  USING    iv_xml_str     TYPE string
+  CHANGING cv_uuid        TYPE string
+           cv_fecha_timb  TYPE string
+           cv_forma_pago  TYPE string
+           cv_metodo_pago TYPE string
+           cv_rfc_ord     TYPE string
+           cv_no_cert     TYPE string.
+
+  DATA lv_xml TYPE string.
+  lv_xml = iv_xml_str.
+  IF lv_xml IS INITIAL. RETURN. ENDIF.
+
+  FIND REGEX 'UUID="([^"]+)"'            IN lv_xml SUBMATCHES cv_uuid.
+  FIND REGEX 'FechaTimbrado="([^"]+)"'   IN lv_xml SUBMATCHES cv_fecha_timb.
+  FIND REGEX 'FormaPago="([^"]+)"'       IN lv_xml SUBMATCHES cv_forma_pago.
+  FIND REGEX 'MetodoPago="([^"]+)"'      IN lv_xml SUBMATCHES cv_metodo_pago.
+  FIND REGEX 'RfcEmisorCtaOrd="([^"]+)"' IN lv_xml SUBMATCHES cv_rfc_ord.
+  IF cv_rfc_ord IS INITIAL.
+    FIND REGEX 'RfcEmisorCtaBen="([^"]+)"' IN lv_xml SUBMATCHES cv_rfc_ord.
+  ENDIF.
+  FIND REGEX 'NoCertificado="?([^"> ]+)"?' IN lv_xml SUBMATCHES cv_no_cert.
+ENDFORM.
+
+FORM f_parse_cfdi_fields_xstr
+  USING    iv_xml_xstr    TYPE xstring
+  CHANGING cv_uuid        TYPE string
+           cv_fecha_timb  TYPE string
+           cv_forma_pago  TYPE string
+           cv_metodo_pago TYPE string
+           cv_rfc_ord     TYPE string
+           cv_no_cert     TYPE string.
+
+  DATA lv_xml_str TYPE string.
+  IF iv_xml_xstr IS INITIAL. RETURN. ENDIF.
+
+  PERFORM zconv_xstr_to_str USING iv_xml_xstr CHANGING lv_xml_str.
+  IF lv_xml_str IS INITIAL. RETURN. ENDIF.
+
+  PERFORM f_parse_cfdi_fields_str
+    USING lv_xml_str
+    CHANGING cv_uuid cv_fecha_timb cv_forma_pago cv_metodo_pago cv_rfc_ord cv_no_cert.
+ENDFORM.
+
+FORM f_apply_forma_pago
+  USING    iv_forma_pago  TYPE clike
+           iv_metodo_pago TYPE clike
+  CHANGING cs_cp1         TYPE zta1_cp1.
+
+  FIELD-SYMBOLS: <f_forma> TYPE any,
+                 <f_metod> TYPE any.
+
+  ASSIGN COMPONENT 'ZTFORMAPAGO' OF STRUCTURE cs_cp1 TO <f_forma>.
+  IF <f_forma> IS ASSIGNED AND iv_forma_pago IS NOT INITIAL.
+    <f_forma> = iv_forma_pago.
+  ENDIF.
+
+  ASSIGN COMPONENT 'MET_PAGODR' OF STRUCTURE cs_cp1 TO <f_metod>.
+  IF <f_metod> IS ASSIGNED AND iv_metodo_pago IS NOT INITIAL.
+    <f_metod> = iv_metodo_pago.
+  ENDIF.
+ENDFORM.
+
+FORM f_fill_from_xml_if_missing
+  CHANGING cs_cp1 TYPE zta1_cp1.
+
+  DATA: lv_uuid    TYPE string,
+        lv_fec     TYPE string,
+        lv_forma   TYPE string,
+        lv_metodo  TYPE string,
+        lv_rfc_ord TYPE string,
+        lv_no_cert TYPE string.
+
+  DATA: lo_desc TYPE REF TO cl_abap_typedescr.
+  FIELD-SYMBOLS: <f_xml_any> TYPE any.
+
+  ASSIGN COMPONENT 'XML_TIMB' OF STRUCTURE cs_cp1 TO <f_xml_any>.
+  IF sy-subrc = 0 AND <f_xml_any> IS ASSIGNED AND <f_xml_any> IS NOT INITIAL.
+    lo_desc = cl_abap_typedescr=>describe_by_data( <f_xml_any> ).
+    CASE lo_desc->type_kind.
+      WHEN cl_abap_typedescr=>typekind_string.
+        PERFORM f_parse_cfdi_fields_str
+          USING    <f_xml_any>
+          CHANGING lv_uuid lv_fec lv_forma lv_metodo lv_rfc_ord lv_no_cert.
+      WHEN cl_abap_typedescr=>typekind_xstring.
+        PERFORM f_parse_cfdi_fields_xstr
+          USING    <f_xml_any>
+          CHANGING lv_uuid lv_fec lv_forma lv_metodo lv_rfc_ord lv_no_cert.
+    ENDCASE.
+  ENDIF.
+
+  IF cs_cp1-uuid_comp IS INITIAL AND lv_uuid IS NOT INITIAL.
+    cs_cp1-uuid_comp = lv_uuid.
+  ENDIF.
+
+  FIELD-SYMBOLS <f_fet> TYPE any.
+  ASSIGN COMPONENT 'ZTFETIMB' OF STRUCTURE cs_cp1 TO <f_fet>.
+  IF <f_fet> IS ASSIGNED AND <f_fet> IS INITIAL AND lv_fec IS NOT INITIAL.
+    <f_fet> = lv_fec.
+  ENDIF.
+
+  PERFORM f_apply_forma_pago USING lv_forma lv_metodo CHANGING cs_cp1.
+
+  FIELD-SYMBOLS <f_rfc_ord> TYPE any.
+  ASSIGN COMPONENT 'RFC_ORD' OF STRUCTURE cs_cp1 TO <f_rfc_ord>.
+  IF <f_rfc_ord> IS ASSIGNED AND <f_rfc_ord> IS INITIAL AND lv_rfc_ord IS NOT INITIAL.
+    <f_rfc_ord> = lv_rfc_ord.
+  ENDIF.
+
+  FIELD-SYMBOLS: <f_no_cert>   TYPE any,
+                 <f_cert_pago> TYPE any.
+  IF lv_no_cert IS NOT INITIAL.
+    ASSIGN COMPONENT 'NO_CERT'   OF STRUCTURE cs_cp1 TO <f_no_cert>.
+    IF <f_no_cert> IS ASSIGNED AND <f_no_cert> IS INITIAL.
+      <f_no_cert> = lv_no_cert.
+    ENDIF.
+    ASSIGN COMPONENT 'CERT_PAGO' OF STRUCTURE cs_cp1 TO <f_cert_pago>.
+    IF <f_cert_pago> IS ASSIGNED AND <f_cert_pago> IS INITIAL.
+      <f_cert_pago> = lv_no_cert.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+"====================== MAPEO DE ESTATUS CENTRAL ======================
+
+FORM f_map_estatus_pac_to_icon
+  USING    iv_estatus_pac TYPE clike
+           iv_uuid        TYPE zfid_uuid_cfdi
+           iv_xml         TYPE xstring
+  CHANGING cv_icon        TYPE zta1_cp1-estatus.
+
+  DATA lv_up TYPE string.
+  lv_up = iv_estatus_pac.
+  TRANSLATE lv_up TO UPPER CASE.
+
+  IF ( lv_up CS 'OK' )
+  OR ( lv_up CS 'TIMBR' )
+  OR ( lv_up CS 'VIGENTE' )
+  OR ( iv_uuid IS NOT INITIAL )
+  OR ( iv_xml  IS NOT INITIAL ).
+    cv_icon = gc_icon_green.
+  ELSE.
+    IF cv_icon IS INITIAL.
+      cv_icon = gc_icon_red.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+"====================== MERGE hacia BD ================================
+
+FORM f_merge_cp1
+  USING    is_new TYPE zta1_cp1
+  CHANGING cs_db  TYPE zta1_cp1.
+
+  DATA: lv_txt           TYPE zta1_cp1-text_est,
+        lv_text_stat_str TYPE string,
+        lv_stat_up       TYPE string.
+
+  lv_stat_up = is_new-estatus. TRANSLATE lv_stat_up TO UPPER CASE.
+  IF is_new-estatus = gc_icon_green OR lv_stat_up CS 'VERDE'.
+    cs_db-estatus = is_new-estatus.
+  ENDIF.
+
+  lv_text_stat_str = is_new-text_est.
+  PERFORM f_fill_text_est USING    cs_db-estatus
+                                   lv_text_stat_str
+                          CHANGING lv_txt.
+  IF lv_txt IS NOT INITIAL.
+    cs_db-text_est = lv_txt.
+  ENDIF.
+
+  PERFORM f_copy_if_new USING 'UUID_COMP'   is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'ZTFETIMB'    is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'ZTFORMAPAGO' is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'MET_PAGODR'  is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'RFC_ORD'     is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'NO_CERT'     is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'CERT_PAGO'   is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'RUTA_XML'    is_new CHANGING cs_db.
+  PERFORM f_copy_if_new USING 'RUTA_PDF'    is_new CHANGING cs_db.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Réplica ALV -> Buffer ZTA1_CP1_2 (tolerante XML_TIMB)               *
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+* Réplica ALV -> Buffer ZTA1_CP1_2 (tolerante XML_TIMB)               *
+*---------------------------------------------------------------------*
+FORM f_replicar_alv_en_cp1
+  USING    is_src            TYPE zsa1_cp1
+           iv_stat           TYPE zta1_cp1-estatus
+           iv_uuid           TYPE zta1_cp1-uuid_comp
+           iv_fechatimbrado  TYPE clike
+           iv_certificado    TYPE clike
+           iv_ruta_pdf       TYPE clike
+           iv_ruta_xml       TYPE clike
+           iv_xml_timbrado   TYPE xstring
+           iv_text_stat      TYPE clike.
+
+  DATA: lwa_cp1       TYPE zta1_cp1,
+        lv_kunnr_norm TYPE kunnr,
+        lv_text_calc  TYPE zta1_cp1-text_est,
+        lv_text_in    TYPE string,
+        lv_xml_str    TYPE string,
+        lv_pdf_tmp    TYPE string,
+        lv_xml_tmp    TYPE string.
+
+  MOVE-CORRESPONDING is_src TO lwa_cp1.
+
+  IF is_src-kunnr IS NOT INITIAL.
+    lv_kunnr_norm = is_src-kunnr.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_kunnr_norm
+      IMPORTING
+        output = lv_kunnr_norm.
+    lwa_cp1-kunnr = lv_kunnr_norm.
+  ENDIF.
+
+  lwa_cp1-numcomp = is_src-numcomp.
+  lwa_cp1-estatus = iv_stat.
+
+  lv_text_in = iv_text_stat.
+  PERFORM f_fill_text_est USING    lwa_cp1-estatus
+                                   lv_text_in
+                          CHANGING lv_text_calc.
+  IF lv_text_calc IS NOT INITIAL.
+    lwa_cp1-text_est = lv_text_calc.
+  ENDIF.
+
+  IF iv_stat = gc_icon_green AND ( lwa_cp1-text_est IS INITIAL OR lwa_cp1-text_est CS 'Cancel' ).
+    lwa_cp1-text_est = 'Timbrado'.
+  ENDIF.
+
+  lwa_cp1-uuid_comp = iv_uuid.
+
+  FIELD-SYMBOLS <f_fet> TYPE any.
+  ASSIGN COMPONENT 'ZTFETIMB' OF STRUCTURE lwa_cp1 TO <f_fet>.
+  IF <f_fet> IS ASSIGNED AND iv_fechatimbrado IS NOT INITIAL.
+    <f_fet> = iv_fechatimbrado.
+  ENDIF.
+
+  " (Se deja el mapeo original pero se forzará abajo a NUMCOMP.ext)
+  PERFORM f_set_field_dyn USING 'RUTA_PDF|RUTAPDF|PATH_PDF|PDF_PATH|FILE_PDF'
+                                iv_ruta_pdf
+                          CHANGING lwa_cp1.
+  PERFORM f_set_field_dyn USING 'RUTA_XML|RUTAXML|PATH_XML|XML_PATH|FILE_XML'
+                                iv_ruta_xml
+                          CHANGING lwa_cp1.
+
+  PERFORM f_get_field_dyn USING lwa_cp1 'RUTA_PDF|RUTAPDF|PATH_PDF|PDF_PATH|FILE_PDF'
+                    CHANGING lv_pdf_tmp.
+  IF lv_pdf_tmp IS NOT INITIAL.
+    PERFORM f_ensure_extension USING 'pdf' CHANGING lv_pdf_tmp.
+    PERFORM f_set_field_dyn USING 'RUTA_PDF|RUTAPDF|PATH_PDF|PDF_PATH|FILE_PDF'
+                                  lv_pdf_tmp
+                            CHANGING lwa_cp1.
+  ENDIF.
+
+  PERFORM f_get_field_dyn USING lwa_cp1 'RUTA_XML|RUTAXML|PATH_XML|XML_PATH|FILE_XML'
+                    CHANGING lv_xml_tmp.
+  IF lv_xml_tmp IS NOT INITIAL.
+    PERFORM f_ensure_extension USING 'xml' CHANGING lv_xml_tmp.
+    PERFORM f_set_field_dyn USING 'RUTA_XML|RUTAXML|PATH_XML|XML_PATH|FILE_XML'
+                                  lv_xml_tmp
+                            CHANGING lwa_cp1.
+  ENDIF.
+
+  FIELD-SYMBOLS: <f_no_cert> TYPE any,
+                 <f_certpag> TYPE any.
+  IF iv_certificado IS NOT INITIAL.
+    ASSIGN COMPONENT 'NO_CERT'   OF STRUCTURE lwa_cp1 TO <f_no_cert>.
+    IF <f_no_cert> IS ASSIGNED.   <f_no_cert> = iv_certificado. ENDIF.
+    ASSIGN COMPONENT 'CERT_PAGO' OF STRUCTURE lwa_cp1 TO <f_certpag>.
+    IF <f_certpag> IS ASSIGNED.   <f_certpag> = iv_certificado. ENDIF.
+  ENDIF.
+
+  IF iv_xml_timbrado IS NOT INITIAL.
+    FIELD-SYMBOLS <f_xml_any> TYPE any.
+    ASSIGN COMPONENT 'XML_TIMB' OF STRUCTURE lwa_cp1 TO <f_xml_any>.
+    IF <f_xml_any> IS ASSIGNED.
+      DATA(lo_desc) = cl_abap_typedescr=>describe_by_data( <f_xml_any> ).
+      CASE lo_desc->type_kind.
+        WHEN cl_abap_typedescr=>typekind_string.
+          CALL FUNCTION 'SCMS_XSTRING_TO_STRING'
+            EXPORTING
+              buffer = iv_xml_timbrado
+            IMPORTING
+              text   = lv_xml_str
+            EXCEPTIONS
+              failed = 1
+              OTHERS = 2.
+          IF sy-subrc = 0 AND lv_xml_str IS NOT INITIAL.
+            <f_xml_any> = lv_xml_str.
+          ENDIF.
+        WHEN cl_abap_typedescr=>typekind_xstring.
+          <f_xml_any> = iv_xml_timbrado.
+      ENDCASE.
+    ENDIF.
+  ENDIF.
+
+  PERFORM f_fill_from_xml_if_missing CHANGING lwa_cp1.
+
+  " >>>>>>>>>>>> FORZAR RUTA_XML / RUTA_PDF = NUMCOMP CON EXTENSIÓN <<<<<<<<<<<
+  DATA: lv_ruta_xml_s TYPE string,
+        lv_ruta_pdf_s TYPE string.
+
+  CLEAR: lv_ruta_xml_s, lv_ruta_pdf_s.
+  lv_ruta_xml_s = lwa_cp1-numcomp.
+  lv_ruta_pdf_s = lwa_cp1-numcomp.
+
+
+  PERFORM f_ensure_extension USING 'xml' CHANGING lv_ruta_xml_s.
+  PERFORM f_ensure_extension USING 'pdf' CHANGING lv_ruta_pdf_s.
+
+  CONCATENATE 'C:\Facturas\' lv_ruta_xml_s INTO lv_ruta_xml_s.
+  CONCATENATE 'C:\Facturas\' lv_ruta_pdf_s INTO lv_ruta_pdf_s.
+
+  lwa_cp1-ruta_xml = lv_ruta_xml_s.
+  lwa_cp1-ruta_pdf = lv_ruta_pdf_s.
+  " >>>>>>>>>>>> FIN AJUSTE <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+  APPEND lwa_cp1 TO t_zta1_cp1_2.
+ENDFORM.
+
+
+"====================== Wrapper ZFI_UPDATE_TEXT =======================
+
+FORM f_update_text
+  USING    iv_belnr     TYPE zfid_noper
+           iv_gjahr     TYPE gjahr
+           iv_bukrs     TYPE bukrs
+           iv_uuid      TYPE zfid_uuid_cfdi
+           iv_tdobject  TYPE tdobject
+  CHANGING ev_success   TYPE flag
+           ev_message   TYPE string.
+
+  DATA: lv_belnr TYPE zfid_noper.
+
+  CLEAR: ev_success, ev_message, lv_belnr.
+
+  lv_belnr = iv_belnr.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = lv_belnr
+    IMPORTING
+      output = lv_belnr.
+
+  IF iv_bukrs IS INITIAL OR lv_belnr IS INITIAL OR
+     iv_gjahr IS INITIAL OR iv_uuid  IS INITIAL.
+    ev_message = |Parámetros requeridos vacíos (BUKRS/BELNR/GJAHR/UUID)|.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'ZFI_UPDATE_TEXT'
+    EXPORTING
+      iv_belnr    = lv_belnr
+      iv_gjahr    = iv_gjahr
+      iv_bukrs    = iv_bukrs
+      iv_uuid     = iv_uuid
+      iv_tdobject = iv_tdobject
+    IMPORTING
+      ev_success  = ev_success
+      ev_message  = ev_message
+    EXCEPTIONS
+      OTHERS      = 1.
+
+  IF sy-subrc <> 0 AND ev_success IS INITIAL.
+    IF ev_message IS INITIAL.
+      ev_message = |Error desconocido en ZFI_UPDATE_TEXT (SY-SUBRC={ sy-subrc })|.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+
+"====================== Descarga / Extensión archivos =================
+
+FORM f_ensure_extension
+  USING    iv_ext  TYPE clike
+  CHANGING cv_path TYPE string.
+
+  DATA: lv_path TYPE string,
+        lv_ext  TYPE string.
+
+  lv_path = cv_path.
+  CONDENSE lv_path NO-GAPS.
+  IF lv_path IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lv_ext = iv_ext.
+  TRANSLATE lv_ext TO LOWER CASE.
+  IF lv_ext IS INITIAL.
+    RETURN.
+  ENDIF.
+  IF lv_ext(1) <> '.'.
+    CONCATENATE '.' lv_ext INTO lv_ext.
+  ENDIF.
+
+  FIND REGEX '\.[^\\/]+$' IN lv_path.
+  IF sy-subrc <> 0.
+    CONCATENATE lv_path lv_ext INTO lv_path.
+  ENDIF.
+
+  cv_path = lv_path.
+ENDFORM.
+
+FORM f_file_save_dialog_ext
+  USING    iv_title         TYPE clike
+           iv_suggest_name  TYPE string
+           iv_def_ext       TYPE clike
+           iv_filter        TYPE string
+  CHANGING cv_fullpath      TYPE string
+           cv_cancel        TYPE abap_bool.
+
+  DATA: lv_fp     TYPE string,  " fullpath
+        lv_fn     TYPE string,  " filename (obligatorio)
+        lv_path   TYPE string,  " path
+        lv_action TYPE i.
+
+  CLEAR: cv_fullpath, cv_cancel.
+
+  TRY.
+      cl_gui_frontend_services=>file_save_dialog(
+        EXPORTING
+          window_title      = iv_title
+          default_file_name = iv_suggest_name
+          default_extension = iv_def_ext
+          file_filter       = iv_filter
+        CHANGING
+          filename          = lv_fn
+          path              = lv_path
+          fullpath          = lv_fp
+          user_action       = lv_action
+      ).
+    CATCH cx_root.
+      cv_cancel = abap_true.
+      RETURN.
+  ENDTRY.
+
+  IF lv_action <> 0 OR lv_fp IS INITIAL.
+    cv_cancel = abap_true.
+    RETURN.
+  ENDIF.
+
+  cv_fullpath = lv_fp.
+  PERFORM f_ensure_extension USING iv_def_ext CHANGING cv_fullpath.
+ENDFORM.
+
+FORM f_xstr_save_bin
+  USING    iv_xstr      TYPE xstring
+           iv_fullpath  TYPE string
+  CHANGING ev_ok        TYPE abap_bool
+           ev_message   TYPE string.
+
+  DATA: lt_bin  TYPE solix_tab,
+        lv_len  TYPE i,
+        lv_path TYPE string.
+
+  CLEAR: ev_ok, ev_message.
+  lv_path = iv_fullpath.
+  CONDENSE lv_path NO-GAPS.
+
+  IF iv_xstr IS INITIAL.
+    ev_message = 'Contenido vacío (XSTRING).'.
+    RETURN.
+  ENDIF.
+  IF lv_path IS INITIAL.
+    ev_message = 'Ruta de archivo vacía (FILENAME).'.
+    RETURN.
+  ENDIF.
+  IF lv_path CP '*\' OR lv_path CP '*/'.
+    ev_message = 'Ruta inválida: falta nombre de archivo.'.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer        = iv_xstr
+    IMPORTING
+      output_length = lv_len
+    TABLES
+      binary_tab    = lt_bin
+    EXCEPTIONS
+      failed        = 1
+      OTHERS        = 2.
+  IF sy-subrc <> 0.
+    ev_message = 'Error al convertir XSTRING a BINARIO.'.
+    RETURN.
+  ENDIF.
+
+  TRY.
+      cl_gui_frontend_services=>gui_download(
+        EXPORTING
+          filename     = lv_path
+          filetype     = 'BIN'
+          bin_filesize = lv_len
+        CHANGING
+          data_tab     = lt_bin
+      ).
+      ev_ok = abap_true.
+    CATCH cx_root INTO DATA(lx).
+      ev_message = lx->get_text( ).
+  ENDTRY.
+ENDFORM.
+
+FORM f_download_xml
+  USING    iv_xml_xstr    TYPE xstring
+           iv_suggestname TYPE string
+  CHANGING ev_ok          TYPE abap_bool
+           ev_message     TYPE string
+           ev_fullpath    TYPE string.
+
+  DATA: lv_path   TYPE string,
+        lv_cancel TYPE abap_bool.
+
+  CLEAR: ev_ok, ev_message, ev_fullpath.
+  PERFORM f_file_save_dialog_ext
+    USING 'Guardar XML timbrado'
+          iv_suggestname
+          'xml'
+          'XML (*.xml)|*.xml|Todos (*.*)|*.*'
+    CHANGING lv_path lv_cancel.
+  IF lv_cancel = abap_true.
+    ev_message = 'Cancelado por el usuario'.
+    RETURN.
+  ENDIF.
+
+  PERFORM f_xstr_save_bin USING iv_xml_xstr lv_path
+                          CHANGING ev_ok ev_message.
+  IF ev_ok = abap_true.
+    ev_fullpath = lv_path.
+  ENDIF.
+ENDFORM.
+
+FORM f_download_pdf
+  USING    iv_pdf_xstr    TYPE xstring
+           iv_suggestname TYPE string
+  CHANGING ev_ok          TYPE abap_bool
+           ev_message     TYPE string
+           ev_fullpath    TYPE string.
+
+  DATA: lv_path   TYPE string,
+        lv_cancel TYPE abap_bool.
+
+  CLEAR: ev_ok, ev_message, ev_fullpath.
+  PERFORM f_file_save_dialog_ext
+    USING 'Guardar PDF'
+          iv_suggestname
+          'pdf'
+          'PDF (*.pdf)|*.pdf|Todos (*.*)|*.*'
+    CHANGING lv_path lv_cancel.
+  IF lv_cancel = abap_true.
+    ev_message = 'Cancelado por el usuario'.
+    RETURN.
+  ENDIF.
+
+  PERFORM f_xstr_save_bin USING iv_pdf_xstr lv_path
+                          CHANGING ev_ok ev_message.
+  IF ev_ok = abap_true.
+    ev_fullpath = lv_path.
+  ENDIF.
+ENDFORM.
+
+"====================== Emisión / Timbrado ============================
+
+FORM f_cp_pol_set
+  USING iv_numcomp TYPE zta1_cp1-numcomp
+        iv_poliza  TYPE clike.
+
+  DATA lv_pol TYPE char35.
+  IF iv_numcomp IS INITIAL OR iv_poliza IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lv_pol = iv_poliza.
+  DELETE gt_cp_pol WHERE numcomp = iv_numcomp.
+  INSERT VALUE ty_cp_pol( numcomp = iv_numcomp poliza = lv_pol )
+         INTO TABLE gt_cp_pol.
+ENDFORM.
+
+FORM f_cp_pol_get
+  USING    iv_numcomp TYPE zta1_cp1-numcomp
+  CHANGING cv_poliza  TYPE clike.
+
+  DATA ls TYPE ty_cp_pol.
+  CLEAR cv_poliza.
+  READ TABLE gt_cp_pol INTO ls WITH TABLE KEY numcomp = iv_numcomp.
+  IF sy-subrc = 0.
+    cv_poliza = ls-poliza.
+  ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+* Emitir / Timbrar Complementos de Pago (botón principal)
+*---------------------------------------------------------------------*
+FORM f_emitir_boton .
+
+  CONSTANTS lc_gui_log(30) TYPE c VALUE 'F_STAT_GUI_LOG'.
+  CONSTANTS lc_1 TYPE c VALUE '1'.
+
+  DATA: lv_answer    TYPE c,
+        lv_factura   TYPE vbrk-vbeln,
+        lv_text_stat TYPE string,
+        lv_stat      TYPE zta1_cp1-estatus,
+        lv_name2     TYPE string.
+
+  DATA: lv_any_success TYPE abap_bool VALUE abap_false.
+  DATA: lv_any_error   TYPE abap_bool VALUE abap_false.
+
+  DATA: lwa_factura_010 TYPE ty_factura_010,
+        lwa_factura_012 TYPE ty_factura_012,
+        lwa_factura_017 TYPE ty_factura_017,
+        lwa_vbrk        TYPE ty_vbrk,
+        lwa_t001        TYPE ty_t001,
+        lwa_t001z       TYPE ty_t001z,
+        lwa_kna1        TYPE ty_kna1,
+        lwa_adrc        TYPE ty_adrc.
+  DATA: lwa_bkpf_sd TYPE ty_bkpf_sd.
+
+  DATA: lwa_clientes TYPE zsa1_cp1,
+        lwa_zta1_2   TYPE zsa1_cp1,
+        lwa_zta1_3   TYPE zsa1_cp1.
+
+  DATA: lt_clientes TYPE STANDARD TABLE OF zsa1_cp1,
+        lt_pagos    TYPE STANDARD TABLE OF zsa1_cp1,
+        lt_fac      TYPE STANDARD TABLE OF zsa1_cp1.
+
+  DATA: lv_uuid          TYPE zfid_uuid_cfdi,
+        lv_fechatimbrado TYPE string,
+        lv_certificado   TYPE string,
+        lv_pathpdf       TYPE string,
+        lv_xml_timbrado  TYPE xstring,
+        lv_response      TYPE xstring,
+        vxml             TYPE string.
+
+  DATA lv_estatus TYPE string.
+  DATA ipaso TYPE i.
+  DATA lv_ztpago TYPE zta1_cp1-ztpago.
+  DATA lv_rfc    TYPE stcd1.
+  DATA v_cons    TYPE char35.
+  DATA: lv_tottrlbaseiva16  TYPE ztottrlbase,
+        lv_tottrlimptoiva16 TYPE ztottrlimpto,
+        lv_tottrlbaseiva8   TYPE ztottrlbase,
+        lv_tottrlimptoiva8  TYPE ztottrlimpto.
+  DATA : lo_logger TYPE REF TO zcl_logger.
+
+  " >>> Correcciones y agregados <<<
+  DATA: wa_zcfdit002 TYPE zcfdit002.  " usado por WS timbra (CHANGING)
+  DATA: lv_resstr    TYPE string.     " respuesta PAC en texto (CHANGING)
+  DATA: lv_request   TYPE xstring.    " request PAC para log
+  DATA: lv_qr_ok     TYPE abap_bool,
+        lv_qr_msg    TYPE string.
+
+  " Declaración añadida
+  DATA lv_decimales TYPE i.
+
+  "======== Confirmación de emisión (o forzar en background)
+  IF sy-batch = c_x.
+    lv_answer = lc_1.
+  ELSE.
+    CALL FUNCTION 'POPUP_TO_CONFIRM'
+      EXPORTING
+        titlebar      = TEXT-s01
+        text_question = TEXT-s02
+        text_button_1 = TEXT-s03
+        text_button_2 = TEXT-s04
+      IMPORTING
+        answer        = lv_answer.
+  ENDIF.
+
+  IF lv_answer <> lc_1.
+    RETURN.
+  ENDIF.
+
+  "======== Preparación de sub-conjuntos
+  CLEAR lv_rfc.
+  t_zta1_2[] = t_zta1_aux[].
+  t_zta1_3[] = t_zta1_aux[].
+  DELETE ADJACENT DUPLICATES FROM t_zta1_3 COMPARING ztpago.
+
+  LOOP AT t_zta1_3 INTO lwa_zta1_3 WHERE seleccion = 'X'.
+
+    CLEAR lv_ztpago.
+    CLEAR v_cons.
+    t_zta1_2[] = t_zta1_aux[].
+    DELETE t_zta1_2 WHERE ztpago NE lwa_zta1_3-ztpago.
+
+    LOOP AT t_zta1_2 INTO lwa_zta1_2 WHERE seleccion = 'X' AND ztpago = lwa_zta1_3-ztpago.
+
+      IF lwa_zta1_2-ztmonp = 'MXN'.
+        lv_decimales = 2.
+      ELSE.
+        lv_decimales = 6.
+      ENDIF.
+
+      IF lwa_zta1_2-ztpago NE lv_ztpago.
+        PERFORM f_get_next_numcomp USING 'ZFI_COMP' '01' CHANGING v_cons.
+        IF sy-subrc = 0 AND ipaso = 0.
+          CREATE OBJECT lo_logger
+            EXPORTING
+              iv_extnumber  = v_cons
+              iv_object     = 'ZCP'
+              iv_subobject  = 'PROCESS'
+              iv_repid      = sy-repid
+              iv_enable_log = abap_true.
+          IF sy-subrc = 0. ipaso = 1. ENDIF.
+        ENDIF.
+      ENDIF.
+
+      " Totales con memoria para renglones vacíos
+      IF NOT lwa_zta1_2-tottrlbaseiva16 IS INITIAL AND lv_tottrlbaseiva16 IS INITIAL.
+        lv_tottrlbaseiva16 = lwa_zta1_2-tottrlbaseiva16.
+      ENDIF.
+      IF NOT lwa_zta1_2-tottrlimptoiva16 IS INITIAL AND lv_tottrlimptoiva16 IS INITIAL.
+        lv_tottrlimptoiva16 = lwa_zta1_2-tottrlimptoiva16.
+      ENDIF.
+      IF lwa_zta1_2-tottrlbaseiva16 IS INITIAL AND NOT lv_tottrlbaseiva16 IS INITIAL.
+        lwa_zta1_2-tottrlbaseiva16 = lv_tottrlbaseiva16.
+      ENDIF.
+      IF lwa_zta1_2-tottrlimptoiva16 IS INITIAL AND NOT lv_tottrlimptoiva16 IS INITIAL.
+        lwa_zta1_2-tottrlimptoiva16 = lv_tottrlimptoiva16.
+      ENDIF.
+
+      IF NOT lwa_zta1_2-tottrlbaseiva8 IS INITIAL AND lv_tottrlbaseiva8 IS INITIAL.
+        lv_tottrlbaseiva8 = lwa_zta1_2-tottrlbaseiva8.
+      ENDIF.
+      IF NOT lwa_zta1_2-tottrlimptoiva8 IS INITIAL AND lv_tottrlimptoiva8 IS INITIAL.
+        lv_tottrlimptoiva8 = lwa_zta1_2-tottrlimptoiva8.
+      ENDIF.
+      IF lwa_zta1_2-tottrlbaseiva8 IS INITIAL AND NOT lv_tottrlbaseiva8 IS INITIAL.
+        lwa_zta1_2-tottrlbaseiva8 = lv_tottrlbaseiva8.
+      ENDIF.
+      IF lwa_zta1_2-tottrlimptoiva8 IS INITIAL AND NOT lv_tottrlimptoiva8 IS INITIAL.
+        lwa_zta1_2-tottrlimptoiva8 = lv_tottrlimptoiva8.
+      ENDIF.
+
+      CONCATENATE 'CP' v_cons INTO lwa_zta1_2-numcomp.
+      MODIFY t_zta1_2 FROM lwa_zta1_2 INDEX sy-tabix.
+      MOVE lwa_zta1_2-rfc_cl TO lv_rfc.
+      MOVE lwa_zta1_2-ztpago TO lv_ztpago.
+    ENDLOOP.
+
+  ENDLOOP.
+
+  lt_clientes[] = t_zta1_2[].
+  lt_pagos[]    = t_zta1_2[].
+  lt_fac[]      = t_zta1_2[].
+
+  SORT lt_clientes BY (v_xx8).
+  SORT lt_pagos    BY (v_xx8) bukrs ztpago anio_pago.
+  DELETE ADJACENT DUPLICATES FROM lt_pagos    COMPARING (v_xx8) bukrs ztpago anio_pago.
+  DELETE ADJACENT DUPLICATES FROM lt_clientes COMPARING (v_xx8).
+  SORT lt_fac BY bukrs ztpago anio_pago.
+
+  READ TABLE lt_pagos ASSIGNING FIELD-SYMBOL(<f_pagos>) INDEX 1.
+  IF sy-subrc EQ 0.
+    IF <f_pagos>-tottrlbaseiva8 IS INITIAL AND NOT lv_tottrlbaseiva8 IS INITIAL.
+      <f_pagos>-tottrlbaseiva8 = lv_tottrlbaseiva8.
+    ENDIF.
+    IF <f_pagos>-tottrlimptoiva8 IS INITIAL AND NOT lv_tottrlimptoiva8 IS INITIAL.
+      <f_pagos>-tottrlimptoiva8 = lv_tottrlimptoiva8.
+    ENDIF.
+    MODIFY lt_pagos FROM <f_pagos> INDEX sy-tabix.
+  ENDIF.
+
+  CLEAR lv_tottrlbaseiva16.
+  CLEAR lv_tottrlbaseiva8.
+  CLEAR lv_tottrlimptoiva16.
+  CLEAR lv_tottrlimptoiva8.
+  SORT t_zta1_2 BY (v_xx8).
+
+  "======== Buffers SD/prints
+  PERFORM f_datos_sd.
+
+  "======== Proceso por cliente/pago
+  LOOP AT lt_clientes INTO lwa_clientes.
+
+    "---- Intento recuperar VBELN desde BKPF_SD
+    READ TABLE t_bkpf_sd INTO lwa_bkpf_sd
+         WITH KEY bukrs = lwa_clientes-bukrs
+                  belnr = lwa_clientes-ztfactrel
+                  gjahr = lwa_clientes-anio_fac
+         BINARY SEARCH.
+    IF sy-subrc EQ 0.
+      lv_factura = lwa_bkpf_sd-awkey.
+    ENDIF.
+
+    PERFORM f_leer_datos_sd
+      USING    lwa_clientes lv_factura
+      CHANGING lwa_factura_010
+               lwa_factura_012
+               lwa_factura_017
+               lwa_vbrk
+               lwa_t001
+               lwa_t001z
+               lwa_kna1
+               lwa_adrc.
+
+    " Nombre informativo (póliza / pago)
+    CLEAR lv_name2.
+    IF lwa_clientes-ztpago IS NOT INITIAL.
+      lv_name2 = lwa_clientes-ztpago.
+    ELSEIF lwa_clientes-ztfactrel IS NOT INITIAL.
+      lv_name2 = lwa_clientes-ztfactrel.
+    ENDIF.
+
+    "---- Generación previa del XML
+    CLEAR: vxml, t_xml, t_datos_mail.
+    PERFORM f_genera_xml_cpago
+       USING    lwa_clientes
+                lt_pagos
+                lt_fac
+                lwa_factura_010
+                lwa_factura_012
+                lwa_factura_017
+                lwa_vbrk
+                lwa_t001
+                lwa_t001z
+                lwa_kna1
+                lwa_adrc
+       CHANGING vxml
+                t_xml
+                t_datos_mail.
+
+    " Validar XML requerido
+    IF vxml IS INITIAL.
+      DATA(lv_msgid_now0) = sy-msgid.
+      DATA(lv_msgno_now0) = sy-msgno.
+      DATA(lv_msgv1_now0) = sy-msgv1.
+      DATA(lv_msgv2_now0) = sy-msgv2.
+      DATA(lv_msgv3_now0) = sy-msgv3.
+      DATA(lv_msgv4_now0) = sy-msgv4.
+      DATA lv_resp_xstr_empty TYPE xstring.
+      CLEAR lv_resp_xstr_empty.
+
+      PERFORM f_show_error_detail
+         USING lwa_clientes
+               lv_resp_xstr_empty
+               'XML generado vacío'
+               'Errores Timbrado'
+               lv_msgid_now0 lv_msgno_now0
+               lv_msgv1_now0 lv_msgv2_now0 lv_msgv3_now0 lv_msgv4_now0.
+
+      lv_any_error = abap_true.
+      CONTINUE. " No intenta timbrar sin XML
+    ENDIF.
+
+    "---- Asegurar logger con handle antes del WS  (paracaídas)
+    IF lo_logger IS NOT BOUND.
+      DATA lv_ext_for_log TYPE string.
+      IF lwa_clientes-numcomp IS NOT INITIAL.
+        lv_ext_for_log = lwa_clientes-numcomp.
+      ELSE.
+        lv_ext_for_log = v_cons.
+      ENDIF.
+      CREATE OBJECT lo_logger
+        EXPORTING
+          iv_extnumber  = lv_ext_for_log
+          iv_object     = 'ZCP'
+          iv_subobject  = 'PROCESS'
+          iv_repid      = sy-repid
+          iv_enable_log = abap_true.
+    ENDIF.
+
+    IF lo_logger IS BOUND AND lwa_clientes-numcomp IS NOT INITIAL.
+      lo_logger->set_extnumber( lwa_clientes-numcomp ).
+    ENDIF.
+
+    "---- Timbrado
+    CLEAR: lv_estatus, lv_uuid, lv_fechatimbrado, lv_certificado, lv_pathpdf,
+           lv_xml_timbrado, lv_response, lv_resstr, wa_zcfdit002.
+
+    PERFORM ws_timbra_cpago
+       USING vxml
+             lwa_clientes-bukrs
+             lv_name2
+             lwa_clientes-numcomp
+             lwa_clientes-rfc_cl
+             lwa_clientes-rfc_ord
+       CHANGING
+             lo_logger
+             lv_uuid
+             lv_fechatimbrado
+             lv_certificado
+             lv_pathpdf
+             lv_estatus
+             lv_text_stat
+             lv_xml_timbrado
+             wa_zcfdit002
+             lv_response
+             lv_resstr.
+
+    CLEAR lv_stat.
+    IF lv_estatus = gc_icon_green OR lv_uuid IS NOT INITIAL OR lv_xml_timbrado IS NOT INITIAL.
+      lv_stat = gc_icon_green.
+
+      " Opcional: guarda request/response del PAC
+      CLEAR lv_request.
+      CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+        EXPORTING
+          text   = vxml
+        IMPORTING
+          buffer = lv_request
+        EXCEPTIONS
+          failed = 1
+          OTHERS = 2.
+      PERFORM update_req_response_pac_logica
+              USING
+                lwa_clientes
+                lv_request       " request
+                lv_response.     " response
+    ENDIF.
+
+    v_log = c_x.
+
+    "---- Error: mostrar detalle inmediato
+    IF lv_stat IS INITIAL OR lv_stat = gc_icon_red.
+
+      DATA(lv_msgid_now) = sy-msgid.
+      DATA(lv_msgno_now) = sy-msgno.
+      DATA(lv_msgv1_now) = sy-msgv1.
+      DATA(lv_msgv2_now) = sy-msgv2.
+      DATA(lv_msgv3_now) = sy-msgv3.
+      DATA(lv_msgv4_now) = sy-msgv4.
+
+      IF lv_resstr IS NOT INITIAL.
+        PERFORM f_show_error_resstr USING lwa_clientes lv_resstr 'Error de timbrado'.
+      ENDIF.
+
+      lv_any_error = abap_true.
+      CONTINUE.
+    ENDIF.
+
+    "---- Éxito: reflejar en buffers / ALV y actualizar textos
+    IF lv_stat = gc_icon_green.
+
+      IF lv_pathpdf IS NOT INITIAL.
+        PERFORM f_ensure_extension USING 'pdf' CHANGING lv_pathpdf.
+      ENDIF.
+
+      PERFORM f_replicar_alv_en_cp1
+        USING lwa_clientes
+              lv_stat
+              lv_uuid
+              lv_fechatimbrado
+              lv_certificado
+              lv_pathpdf
+              space
+              lv_request
+              lv_text_stat.
+
+      PERFORM f_sync_alv_line
+        USING lwa_clientes
+              lv_stat
+              lv_uuid
+              lv_fechatimbrado
+              lv_text_stat.
+
+      lv_any_success = abap_true.
+
+      IF lv_name2 IS NOT INITIAL.
+        PERFORM f_cp_pol_set USING lwa_clientes-numcomp lv_name2.
+      ENDIF.
+
+      " Actualiza texto del documento con el UUID (FI)
+      DATA: lv_ok        TYPE flag,
+            lv_msg       TYPE string,
+            lv_belnr_upd TYPE zfid_noper.
+
+      IF lwa_clientes-ztpago IS NOT INITIAL.
+        lv_belnr_upd = lwa_clientes-ztpago.
+      ELSEIF lwa_clientes-ztfactrel IS NOT INITIAL.
+        lv_belnr_upd = lwa_clientes-ztfactrel.
+      ENDIF.
+
+      IF lv_belnr_upd IS NOT INITIAL AND lv_uuid IS NOT INITIAL.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = lv_belnr_upd
+          IMPORTING
+            output = lv_belnr_upd.
+
+        PERFORM f_update_text USING    lv_belnr_upd
+                                      lwa_clientes-anio_pago
+                                      lwa_clientes-bukrs
+                                      lv_uuid
+                                      space
+                             CHANGING lv_ok
+                                      lv_msg.
+      ENDIF.
+
+      " >>> Generar y UPSERT de CODE_QR en ZCP_SOVOS (CFDI 4.0)
+      CLEAR: lv_qr_ok, lv_qr_msg.
+      PERFORM f_upsert_zcp_sovos_qr
+        USING    lwa_clientes
+                 lv_uuid
+                 lv_xml_timbrado
+        CHANGING lv_qr_ok
+                 lv_qr_msg.
+      IF lv_qr_ok IS INITIAL AND lv_qr_msg IS NOT INITIAL.
+        MESSAGE w398(00) WITH lv_qr_msg.
+      ENDIF.
+
+    ENDIF.
+
+    REFRESH t_datos_mail[].
+    REFRESH t_xml[].
+
+  ENDLOOP.
+
+  " Guardar log al final
+  IF lo_logger IS BOUND.
+    lo_logger->save( ).  " BAL_DB_SAVE + refresh
+  ENDIF.
+
+  "======== UPSERT y, si hubo éxito, avisar y refrescar ALV
+  IF lv_any_success = abap_true AND t_zta1_cp1_2 IS NOT INITIAL.
+    DATA lv_default_estatus TYPE zta1_cp1-estatus.
+    lv_default_estatus = gc_icon_green.
+
+    " Inserta/actualiza en ZTA1_CP1 usando el buffer temporal
+    PERFORM f_upsert_zta1_cp1_batch USING 'T_ZTA1_CP1_2' lv_default_estatus.
+
+    " Flujo simple de éxito: mensaje + abrir TEMP + ALV
+    PERFORM f_exito_cp_timbre_simple
+      USING 'T_ZTA1_CP1_2'
+            'Complemento de pago timbrado correctamente.'
+            lc_gui_log.
+
+    " Limpia el buffer
+    REFRESH t_zta1_cp1_2.
+  ENDIF.
+
+  " Si por alguna razón llegamos aquí con último doc en error (respaldo)
+  IF lv_stat IS INITIAL OR lv_stat = gc_icon_red.
+    RETURN.
+  ENDIF.
+
+  PERFORM f_alv_el USING lc_gui_log.
+
+ENDFORM.
+
+
+
+
+
+"====================== UPSERT masivo ================================
+
+*---------------------------------------------------------------------*
+* UPSERT masivo + abrir PDF generándolo (no usa ruta_pdf)             *
+*---------------------------------------------------------------------*
+FORM f_upsert_zta1_cp1_batch
+  USING
+    iv_tabname         TYPE string
+    iv_default_estatus TYPE zta1_cp1-estatus.
+
+  DATA: lv_inserted   TYPE i VALUE 0,
+        lv_updated    TYPE i VALUE 0,
+        lv_skipped    TYPE i VALUE 0,
+        lv_failed     TYPE i VALUE 0,
+        lv_viewed     TYPE i VALUE 0,
+        lv_kunnr_norm TYPE kunnr.
+
+  DATA: lwa_new TYPE zta1_cp1,
+        lwa_db  TYPE zta1_cp1.
+
+  DATA: lt_success TYPE STANDARD TABLE OF ty_cp1_success,
+        ls_success TYPE ty_cp1_success.
+
+  FIELD-SYMBOLS: <lt_any>   TYPE STANDARD TABLE,
+                 <ls_any>   TYPE any,
+                 <fs_kunnr> TYPE any.
+
+  DATA: lv_doc   TYPE string,
+        lv_s_pdf TYPE string,
+        lv_s_xml TYPE string.
+
+  ASSIGN (iv_tabname) TO <lt_any>.
+  IF <lt_any> IS NOT ASSIGNED.
+    MESSAGE e004(00) WITH |Tabla interna { iv_tabname } no asignada|.
+    RETURN.
+  ENDIF.
+
+  LOOP AT <lt_any> ASSIGNING <ls_any>.
+    CLEAR: lwa_new, lwa_db.
+    MOVE-CORRESPONDING <ls_any> TO lwa_new.
+
+    ASSIGN COMPONENT 'KUNNR' OF STRUCTURE <ls_any> TO <fs_kunnr>.
+    IF <fs_kunnr> IS ASSIGNED AND <fs_kunnr> IS NOT INITIAL.
+      lv_kunnr_norm = <fs_kunnr>.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lv_kunnr_norm
+        IMPORTING
+          output = lv_kunnr_norm.
+      lwa_new-kunnr = lv_kunnr_norm.
+    ENDIF.
+
+    IF lwa_new-estatus IS INITIAL AND iv_default_estatus IS NOT INITIAL.
+      lwa_new-estatus = iv_default_estatus.
+    ENDIF.
+
+    PERFORM f_set_from_sources USING 'UUID_COMP'     'UUID_COMP|UUID|UUID_CFDI'      <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'ZTFETIMB'      'ZTFETIMB|FECHA_TIMBRADO|F_TIMBRADO|ZTFETIMBRADO' <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'ZTFORMAPAGO'   'ZTFORMAPAGO|MET_PAGODR|FORMA_PAGO|FORMADEPAGO'    <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'MET_PAGODR'    'ZTFORMAPAGO|MET_PAGODR|FORMA_PAGO|FORMADEPAGO'    <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'RFC_ORD'       'RFC_ORD|RFC_ORDENANTE|RFCORD' <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'NO_CERT'       'NO_CERT|CERT_PAGO|NUM_CERT|NOCERT' <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'CERT_PAGO'     'NO_CERT|CERT_PAGO|NUM_CERT|NOCERT' <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'RUTA_XML'      'RUTA_XML|RUTAXML|PATH_XML|XML_PATH|FILE_XML' <ls_any> CHANGING lwa_new.
+    PERFORM f_set_from_sources USING 'RUTA_PDF'      'RUTA_PDF|RUTAPDF|PATH_PDF|PDF_PATH|FILE_PDF' <ls_any> CHANGING lwa_new.
+
+    PERFORM f_fill_from_xml_if_missing CHANGING lwa_new.
+
+    IF lwa_new-bukrs     IS INITIAL OR
+       lwa_new-kunnr     IS INITIAL OR
+       lwa_new-ztpago    IS INITIAL OR
+       lwa_new-anio_pago IS INITIAL OR
+       lwa_new-ztfactrel IS INITIAL OR
+       lwa_new-anio_fac  IS INITIAL.
+      ADD 1 TO lv_skipped.
+      CONTINUE.
+    ENDIF.
+
+    SELECT SINGLE * INTO lwa_db FROM zta1_cp1
+      WHERE bukrs     = lwa_new-bukrs
+        AND kunnr     = lwa_new-kunnr
+        AND ztpago    = lwa_new-ztpago
+        AND anio_pago = lwa_new-anio_pago
+        AND ztfactrel = lwa_new-ztfactrel
+        AND anio_fac  = lwa_new-anio_fac.
+
+    IF sy-subrc <> 0.
+      INSERT zta1_cp1 FROM lwa_new.
+      IF sy-subrc = 0.
+        ADD 1 TO lv_inserted.
+        CLEAR ls_success.
+        ls_success-bukrs     = lwa_new-bukrs.
+        ls_success-kunnr     = lwa_new-kunnr.
+        ls_success-ztpago    = lwa_new-ztpago.
+        ls_success-anio_pago = lwa_new-anio_pago.
+        ls_success-ztfactrel = lwa_new-ztfactrel.
+        ls_success-anio_fac  = lwa_new-anio_fac.
+        ls_success-numcomp   = lwa_new-numcomp.
+        ls_success-estatus   = lwa_new-estatus.
+        ls_success-uuid_comp = lwa_new-uuid_comp.
+        ls_success-ztfetimb  = lwa_new-ztfetimb.
+
+        CLEAR: lv_s_pdf, lv_s_xml.
+        PERFORM f_get_field_dyn USING lwa_new 'RUTA_PDF|RUTAPDF|PATH_PDF|PDF_PATH|FILE_PDF'
+                          CHANGING lv_s_pdf.
+        PERFORM f_get_field_dyn USING lwa_new 'RUTA_XML|RUTAXML|PATH_XML|XML_PATH|FILE_XML'
+                          CHANGING lv_s_xml.
+        ls_success-ruta_pdf = lv_s_pdf.
+        ls_success-ruta_xml = lv_s_xml.
+
+        IF lwa_new-xml_timb IS NOT INITIAL OR ls_success-ruta_xml IS NOT INITIAL.
+          ls_success-xml_dispon = abap_true.
+        ELSE.
+          ls_success-xml_dispon = abap_false.
+        ENDIF.
+        APPEND ls_success TO lt_success.
+      ELSE.
+        ADD 1 TO lv_failed.
+      ENDIF.
+    ELSE.
+      PERFORM f_merge_cp1 USING lwa_new CHANGING lwa_db.
+      UPDATE zta1_cp1 FROM lwa_db.
+      IF sy-subrc = 0.
+        ADD 1 TO lv_updated.
+        CLEAR ls_success.
+        ls_success-bukrs     = lwa_db-bukrs.
+        ls_success-kunnr     = lwa_db-kunnr.
+        ls_success-ztpago    = lwa_db-ztpago.
+        ls_success-anio_pago = lwa_db-anio_pago.
+        ls_success-ztfactrel = lwa_db-ztfactrel.
+        ls_success-anio_fac  = lwa_db-anio_fac.
+        ls_success-numcomp   = lwa_db-numcomp.
+        ls_success-estatus   = lwa_db-estatus.
+        ls_success-uuid_comp = lwa_db-uuid_comp.
+        ls_success-ztfetimb  = lwa_db-ztfetimb.
+
+        CLEAR: lv_s_pdf, lv_s_xml.
+        PERFORM f_get_field_dyn USING lwa_db 'RUTA_PDF|RUTAPDF|PATH_PDF|PDF_PATH|FILE_PDF'
+                          CHANGING lv_s_pdf.
+        PERFORM f_get_field_dyn USING lwa_db 'RUTA_XML|RUTAXML|PATH_XML|XML_PATH|FILE_XML'
+                          CHANGING lv_s_xml.
+        ls_success-ruta_pdf = lv_s_pdf.
+        ls_success-ruta_xml = lv_s_xml.
+
+        IF lwa_db-xml_timb IS NOT INITIAL OR ls_success-ruta_xml IS NOT INITIAL.
+          ls_success-xml_dispon = abap_true.
+        ELSE.
+          ls_success-xml_dispon = abap_false.
+        ENDIF.
+        APPEND ls_success TO lt_success.
+      ELSE.
+        ADD 1 TO lv_failed.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  IF lv_inserted > 0 OR lv_updated > 0.
+    COMMIT WORK AND WAIT.
+  ENDIF.
+
+  IF lt_success IS NOT INITIAL.
+    DATA lt_text TYPE soli_tab.
+    PERFORM f_build_success_template USING lt_success CHANGING lt_text.
+    PERFORM f_show_success_template USING lt_text.
+  ENDIF.
+
+*  DATA lv_send_now TYPE abap_bool.
+*  PERFORM f_prompt_send_decision CHANGING lv_send_now.
+*
+*  "=== CAMBIO: generar y mostrar PDF (SmartForm) en lugar de abrir ruta_pdf
+*  IF lv_send_now = abap_true.
+*    PERFORM f_open_pdfs_for_buffer USING 'T_ZTA1_CP1_2'.
+*    lv_viewed = lines( lt_success ).  "conteo aproximado de PDFs mostrados
+*  ENDIF.
+
+  WRITE: / |ZTA1_CP1 -> Insertados: { lv_inserted }  Actualizados: { lv_updated }  PDF abiertos: { lv_viewed }  Saltados: { lv_skipped }  Fallidos: { lv_failed }|.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+* Abre PDFs del buffer con SmartForm (pasa TODA la fila)              *
+*---------------------------------------------------------------------*
+FORM f_open_pdfs_for_buffer
+  USING iv_tabname TYPE string.
+
+  FIELD-SYMBOLS: <lt_any> TYPE STANDARD TABLE,
+                 <ls_any> TYPE any.
+
+  DATA: ls_cli   TYPE zsa1_cp1,
+        lv_fname TYPE string.
+
+  ASSIGN (iv_tabname) TO <lt_any>.
+  IF <lt_any> IS NOT ASSIGNED OR <lt_any> IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  LOOP AT <lt_any> ASSIGNING <ls_any>.
+    CLEAR: ls_cli, lv_fname.
+
+    " <<< PASA TODA LA FILA >>>
+    MOVE-CORRESPONDING <ls_any> TO ls_cli.
+
+    IF ls_cli-bukrs   IS INITIAL OR
+       ls_cli-numcomp IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    lv_fname = ls_cli-numcomp.
+
+    " Visualiza generando el PDF en TEMP y abriendo
+    PERFORM f_visualiza_pdf_en_pantalla USING ls_cli lv_fname.
+  ENDLOOP.
+ENDFORM.
+
+
+
+
+*---------------------------------------------------------------------*
+* Flujo de éxito: mensaje + abrir PDFs (TEMP) + refrescar ALV         *
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+* Flujo de éxito: mensaje + abrir PDFs (TEMP) + refrescar ALV         *
+*---------------------------------------------------------------------*
+FORM f_exito_cp_timbre_simple
+  USING iv_buffer_tab TYPE string    " normalmente 'T_ZTA1_CP1_2'
+       iv_msg_text   TYPE string     " texto a mostrar (mensaje corto)
+       iv_gui_log    TYPE c.         " ej. lc_gui_log
+
+  " Mensaje corto de éxito
+  IF iv_msg_text IS INITIAL.
+    MESSAGE s000(00) WITH 'Complemento de pago timbrado correctamente.'.
+  ELSE.
+    MESSAGE s000(00) WITH iv_msg_text.
+  ENDIF.
+
+  " Abrir PDFs del buffer con el perform TEMP
+  PERFORM f_open_pdfs_for_buffer USING iv_buffer_tab.
+
+  " Refrescar ALV
+  PERFORM f_alv_el USING iv_gui_log.
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* Muestra ALV/log solo si hay datos                                   *
+*---------------------------------------------------------------------*
+FORM f_safe_show_alv USING iv_gui_log TYPE c.
+  DATA lv_has_data TYPE abap_bool VALUE abap_false.
+  IF t_zta1_aux IS NOT INITIAL OR
+     t_zta1_2   IS NOT INITIAL OR
+     t_zta1_cp1_2 IS NOT INITIAL.
+    lv_has_data = abap_true.
+  ENDIF.
+  IF lv_has_data = abap_true.
+    PERFORM f_alv_el USING iv_gui_log.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Wrapper: obtiene el siguiente número de rango                       *
+*---------------------------------------------------------------------*
+FORM f_get_next_numcomp
+  USING    iv_object   TYPE c
+           iv_interval TYPE c
+  CHANGING cv_number   TYPE char35.
+
+  DATA: lv_num1 TYPE n LENGTH 10,
+        lv_num2 TYPE n LENGTH 10.
+
+  CLEAR: cv_number, lv_num1, lv_num2.
+
+  TRY.
+      CALL FUNCTION 'NUMBER_GET_NEXT'
+        EXPORTING
+          nr_range_nr             = iv_interval
+          object                  = iv_object
+        IMPORTING
+          number                  = lv_num1
+        EXCEPTIONS
+          interval_not_found      = 1
+          number_range_not_intern = 2
+          object_not_found        = 3
+          quantity_is_0           = 4
+          quantity_is_not_1       = 5
+          interval_overflow       = 6
+          buffer_overflow         = 7
+          OTHERS                  = 8.
+      IF sy-subrc = 0.
+        cv_number = lv_num1.
+        RETURN.
+      ENDIF.
+    CATCH cx_sy_dyn_call_param_not_found.
+  ENDTRY.
+
+  CALL FUNCTION 'NUMBER_GET_NEXT'
+    EXPORTING
+      nr_range_nr             = iv_interval
+      object                  = iv_object
+    IMPORTING
+      tonumber                = lv_num2
+    EXCEPTIONS
+      interval_not_found      = 1
+      number_range_not_intern = 2
+      object_not_found        = 3
+      quantity_is_0           = 4
+      quantity_is_not_1       = 5
+      interval_overflow       = 6
+      buffer_overflow         = 7
+      OTHERS                  = 8.
+
+  IF sy-subrc = 0.
+    cv_number = lv_num2.
+  ELSE.
+    CLEAR cv_number.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* ALV seguro para EMITIR (evita dumps y callbacks faltantes)          *
+*---------------------------------------------------------------------*
+FORM f_alv_emitir_safe USING iv_pf_status TYPE slis_formname.
+
+  DATA: lwa_layout    TYPE slis_layout_alv,
+        lt_fieldcat   TYPE slis_t_fieldcat_alv,
+        lwa_fieldcat  TYPE slis_fieldcat_alv,
+        lt_excluding  TYPE slis_t_extab,
+        lwa_excluding TYPE slis_extab,
+        lv_has_uc     TYPE abap_bool VALUE abap_false,
+        lv_has_pfstat TYPE abap_bool VALUE abap_false.
+
+  IF t_zta1_2 IS INITIAL.
+    MESSAGE s000(00) WITH 'No hay información para mostrar'.
+    RETURN.
+  ENDIF.
+
+  DATA lr_tab  TYPE REF TO cl_abap_tabledescr.
+  DATA lr_line TYPE REF TO cl_abap_structdescr.
+  DATA lv_ddic TYPE dd02l-tabname.
+
+  TRY.
+      lr_tab ?= cl_abap_tabledescr=>describe_by_data( t_zta1_2 ).
+      lr_line ?= lr_tab->get_table_line_type( ).
+      lv_ddic = lr_line->get_relative_name( ).
+    CATCH cx_root.
+      CLEAR lv_ddic.
+  ENDTRY.
+
+  CLEAR lt_fieldcat.
+
+  IF lv_ddic IS NOT INITIAL.
+    CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+      EXPORTING
+        i_program_name         = sy-repid
+        i_structure_name       = lv_ddic
+        i_bypassing_buffer     = 'X'
+        i_inclname             = sy-repid
+      CHANGING
+        ct_fieldcat            = lt_fieldcat
+      EXCEPTIONS
+        inconsistent_interface = 1
+        program_error          = 2
+        OTHERS                 = 3.
+  ELSE.
+    CALL FUNCTION 'REUSE_ALV_FIELDCATALOG_MERGE'
+      EXPORTING
+        i_program_name         = sy-repid
+        i_internal_tabname     = 'T_ZTA1_2'
+        i_bypassing_buffer     = 'X'
+        i_inclname             = sy-repid
+      CHANGING
+        ct_fieldcat            = lt_fieldcat
+      EXCEPTIONS
+        inconsistent_interface = 1
+        program_error          = 2
+        OTHERS                 = 3.
+  ENDIF.
+
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    RETURN.
+  ENDIF.
+
+  LOOP AT lt_fieldcat INTO lwa_fieldcat.
+    IF lwa_fieldcat-fieldname = c_seleccion OR
+       lwa_fieldcat-fieldname = c_tipo_cadpago OR
+       lwa_fieldcat-fieldname = c_cert_pago   OR
+       lwa_fieldcat-fieldname = c_nocert      OR
+       lwa_fieldcat-fieldname = c_cad_pago    OR
+       lwa_fieldcat-fieldname = c_sello_pag   OR
+       lwa_fieldcat-fieldname = c_serie       OR
+       lwa_fieldcat-fieldname = c_rutaxml     OR
+       lwa_fieldcat-fieldname = c_rutapdf     OR
+       lwa_fieldcat-fieldname = c_num_par     OR
+       lwa_fieldcat-fieldname = 'XML_TIMB'.
+      lwa_fieldcat-no_out = 'X'.
+
+    ELSEIF lwa_fieldcat-fieldname = c_uuid_fac.
+      lwa_fieldcat-seltext_l = TEXT-c27. lwa_fieldcat-seltext_m = TEXT-c27.
+      lwa_fieldcat-seltext_s = TEXT-c27. lwa_fieldcat-reptext_ddic = TEXT-c27.
+
+    ELSEIF lwa_fieldcat-fieldname = c_uuid_comp.
+      lwa_fieldcat-seltext_l = TEXT-c28. lwa_fieldcat-seltext_m = TEXT-c28.
+      lwa_fieldcat-seltext_s = TEXT-c28. lwa_fieldcat-reptext_ddic = TEXT-c28.
+
+    ELSEIF lwa_fieldcat-fieldname = c_rfc_ord.
+      lwa_fieldcat-seltext_l = TEXT-c23. lwa_fieldcat-seltext_m = TEXT-c23.
+      lwa_fieldcat-seltext_s = TEXT-c23. lwa_fieldcat-reptext_ddic = TEXT-c23.
+
+    ELSEIF lwa_fieldcat-fieldname = c_rfc_ben.
+      lwa_fieldcat-seltext_l = TEXT-c24. lwa_fieldcat-seltext_m = TEXT-c24.
+      lwa_fieldcat-seltext_s = TEXT-c24. lwa_fieldcat-reptext_ddic = TEXT-c24.
+
+    ELSEIF lwa_fieldcat-fieldname = c_anio_pago.
+      lwa_fieldcat-seltext_l = TEXT-c25. lwa_fieldcat-seltext_m = TEXT-c25.
+      lwa_fieldcat-seltext_s = TEXT-c25. lwa_fieldcat-reptext_ddic = TEXT-c25.
+
+    ELSEIF lwa_fieldcat-fieldname = c_anio_fac.
+      lwa_fieldcat-seltext_l = TEXT-c26. lwa_fieldcat-seltext_m = TEXT-c26.
+      lwa_fieldcat-seltext_s = TEXT-c26. lwa_fieldcat-reptext_ddic = TEXT-c26.
+
+    ELSEIF lwa_fieldcat-fieldname = c_numcomp.
+      lwa_fieldcat-seltext_l = TEXT-c29. lwa_fieldcat-seltext_m = TEXT-c29.
+      lwa_fieldcat-seltext_s = TEXT-c29. lwa_fieldcat-reptext_ddic = TEXT-c29.
+    ENDIF.
+
+    MODIFY lt_fieldcat FROM lwa_fieldcat.
+  ENDLOOP.
+
+  CONSTANTS: lc_eb9(4) TYPE c VALUE '&EB9',
+             lc_all(4) TYPE c VALUE '&ALL',
+             lc_sal(4) TYPE c VALUE '&SAL',
+             lc_xpa(4) TYPE c VALUE '&XPA',
+             lc_aqw(4) TYPE c VALUE '&AQW',
+             lc_omp(4) TYPE c VALUE '&OMP',
+             lc_lfo(4) TYPE c VALUE '&LFO',
+             lc_nfo(4) TYPE c VALUE '&NFO',
+             lc_abc(4) TYPE c VALUE '&ABC',
+             lc_crb(4) TYPE c VALUE '&CRB',
+             lc_crl(4) TYPE c VALUE '&CRL',
+             lc_crr(4) TYPE c VALUE '&CRR',
+             lc_cre(4) TYPE c VALUE '&CRE'.
+  DEFINE add_ex.
+    lwa_excluding-fcode = &1.
+    APPEND lwa_excluding TO lt_excluding.
+  END-OF-DEFINITION.
+  add_ex lc_eb9. add_ex lc_all. add_ex lc_sal. add_ex lc_xpa. add_ex lc_aqw.
+  add_ex lc_omp. add_ex lc_lfo. add_ex lc_nfo. add_ex lc_abc. add_ex lc_crb.
+  add_ex lc_crl. add_ex lc_crr. add_ex lc_cre.
+
+  lwa_layout-zebra             = 'X'.
+  lwa_layout-colwidth_optimize = 'X'.
+
+  DATA lv_dummy_ucomm TYPE sy-ucomm.
+  DATA ls_dummy_self  TYPE slis_selfield.
+  CLEAR: lv_dummy_ucomm, ls_dummy_self.
+
+  PERFORM ('F_USER_COMMAND') IN PROGRAM (sy-repid) IF FOUND
+          USING lv_dummy_ucomm ls_dummy_self.
+  DATA(lv_has_uc_tmp) = sy-subrc.
+  IF lv_has_uc_tmp = 0. lv_has_uc = abap_true. ENDIF.
+
+  PERFORM (iv_pf_status) IN PROGRAM (sy-repid) IF FOUND.
+  DATA(lv_has_pf_tmp) = sy-subrc.
+  IF lv_has_pf_tmp = 0. lv_has_pfstat = abap_true. ENDIF.
+
+  IF lv_has_uc = abap_true AND lv_has_pfstat = abap_true.
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_callback_program       = sy-repid
+        i_callback_pf_status_set = iv_pf_status
+        i_callback_user_command  = 'F_USER_COMMAND'
+        is_layout                = lwa_layout
+        it_fieldcat              = lt_fieldcat
+        it_excluding             = lt_excluding
+      TABLES
+        t_outtab                 = t_zta1_2.
+  ELSEIF lv_has_pfstat = abap_true.
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_callback_program       = sy-repid
+        i_callback_pf_status_set = iv_pf_status
+        is_layout                = lwa_layout
+        it_fieldcat              = lt_fieldcat
+        it_excluding             = lt_excluding
+      TABLES
+        t_outtab                 = t_zta1_2.
+  ELSE.
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_callback_program = sy-repid
+        is_layout          = lwa_layout
+        it_fieldcat        = lt_fieldcat
+        it_excluding       = lt_excluding
+      TABLES
+        t_outtab           = t_zta1_2.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* f_genera_xml_cpago: usa zcl_cpago_xml_builder_cp20 y regresa el XML *
+*---------------------------------------------------------------------*
+FORM f_genera_xml_cpago
+  USING    is_cliente     TYPE zsa1_cp1
+           it_pagos       TYPE ANY TABLE
+           it_fac         TYPE ANY TABLE
+           is_fac010      TYPE ty_factura_010
+           is_fac012      TYPE ty_factura_012
+           is_fac017      TYPE ty_factura_017
+           is_vbrk        TYPE ty_vbrk
+           is_t001        TYPE ty_t001
+           is_t001z       TYPE ty_t001z
+           is_kna1        TYPE ty_kna1
+           is_adrc        TYPE ty_adrc
+  CHANGING cv_xml         TYPE string
+           ct_xml         TYPE ANY TABLE
+           ct_datos_mail  TYPE ANY TABLE.
+
+  " Adaptadores de tablas genéricas
+  TYPES: tt_zsa1_cp1 TYPE STANDARD TABLE OF zsa1_cp1 WITH EMPTY KEY.
+  DATA: lt_pagos       TYPE tt_zsa1_cp1,
+        lt_fac         TYPE tt_zsa1_cp1,
+        lwa_datos_mail TYPE ty_datos_mail.
+
+  FIELD-SYMBOLS: <ftab> TYPE ANY TABLE.
+
+  ASSIGN it_pagos TO <ftab>.
+  IF <ftab> IS ASSIGNED. lt_pagos[] = <ftab>[]. ENDIF.
+  ASSIGN it_fac   TO <ftab>.
+  IF <ftab> IS ASSIGNED. lt_fac[]   = <ftab>[]. ENDIF.
+
+  " Instanciar la clase pedida
+  DATA lo TYPE REF TO zcl_cpago_xml_builder_cp20.
+  TRY.
+      CREATE OBJECT lo.
+    CATCH cx_root.
+      CLEAR cv_xml.
+      REFRESH ct_xml.
+      REFRESH ct_datos_mail.
+      RETURN.
+  ENDTRY.
+
+  " Limpiar buffers y llamar al generador
+  CLEAR t_xml.   " (o REFRESH t_xml[] si lo prefieres)
+  REFRESH t_datos_mail.
+
+  TRY.
+      CALL METHOD lo->genera_xml
+        EXPORTING
+          pwa_clientes    = is_cliente
+          pt_pagos        = lt_pagos
+          pt_fac          = lt_fac
+          pwa_factura_010 = is_fac010
+          pwa_factura_012 = is_fac012
+          pwa_factura_017 = is_fac017
+          pwa_vbrk        = is_vbrk
+          pwa_t001        = is_t001
+          pwa_t001z       = is_t001z
+          pwa_kna1        = is_kna1
+          pwa_adrc        = is_adrc
+          pztmonp         = is_cliente-ztmonp
+          ptcambio        = is_cliente-tcambio
+        CHANGING
+          pwa_datos_mail  = lwa_datos_mail
+          ct_xml          = t_xml.
+    CATCH cx_root.
+      CLEAR cv_xml.
+      REFRESH ct_xml.
+      REFRESH ct_datos_mail.
+      RETURN.
+  ENDTRY.
+
+  " Entregar buffers al llamador
+  ct_xml        = t_xml.
+  ct_datos_mail = t_datos_mail.
+
+  " Construir el string XML desde la tabla t_xml (campo LINEA/LINE/TEXT/TDLINE)
+  CLEAR cv_xml.
+  FIELD-SYMBOLS: <row> TYPE any,
+                 <f>   TYPE any.
+
+  LOOP AT t_xml ASSIGNING <row>.
+    ASSIGN COMPONENT 'LINEA'  OF STRUCTURE <row> TO <f>.
+    IF sy-subrc <> 0 OR <f> IS INITIAL.
+      ASSIGN COMPONENT 'LINE'   OF STRUCTURE <row> TO <f>.
+    ENDIF.
+    IF sy-subrc <> 0 OR <f> IS INITIAL.
+      ASSIGN COMPONENT 'TEXT'   OF STRUCTURE <row> TO <f>.
+    ENDIF.
+    IF sy-subrc <> 0 OR <f> IS INITIAL.
+      ASSIGN COMPONENT 'TDLINE' OF STRUCTURE <row> TO <f>.
+    ENDIF.
+
+    IF sy-subrc = 0 AND <f> IS ASSIGNED AND <f> IS NOT INITIAL.
+      IF cv_xml IS INITIAL.
+        cv_xml = <f>.
+      ELSE.
+        CONCATENATE cv_xml <f> INTO cv_xml
+          SEPARATED BY cl_abap_char_utilities=>newline.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Toma el mejor texto de error disponible (PAC -> texto -> mensaje)   *
+*---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+* Toma el mejor texto de error disponible (PAC -> texto -> mensaje)   *
+*---------------------------------------------------------------------*
+FORM f_pick_error_text
+  USING    iv_resp_xstr  TYPE xstring   " Respuesta PAC (xstring)
+           iv_text_stat  TYPE clike     " Texto interno/estatus
+  CHANGING cv_strmsg     TYPE string.   " Mensaje elegido (string)
+
+  DATA: lv_full  TYPE string,
+        lv_extr  TYPE string,
+        lv_dummy TYPE string.
+
+  CLEAR cv_strmsg.
+
+  " 1) PAC -> xstring a string
+  IF iv_resp_xstr IS NOT INITIAL.
+    PERFORM zconv_xstr_to_str USING iv_resp_xstr CHANGING lv_full.
+
+    " 1a) Atributo tipo  key="valor"
+    "     p.ej. Descripcion="CFDI inválido" o faultstring="Detail ..."
+    FIND REGEX '(Descripcion|Descripción|Mensaje|message|faultstring)\s*=\s*"([^"]+)"'
+      IN lv_full IGNORING CASE
+      SUBMATCHES lv_dummy lv_extr.
+    IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+      cv_strmsg = lv_extr.
+    ENDIF.
+
+    " 1b) Etiqueta XML <key>valor</key>
+    IF cv_strmsg IS INITIAL.
+      FIND REGEX '<(Descripcion|Descripción|Mensaje|message|faultstring)[^>]*>([^<]+)<'
+        IN lv_full IGNORING CASE
+        SUBMATCHES lv_dummy lv_extr.
+      IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+        cv_strmsg = lv_extr.
+      ENDIF.
+    ENDIF.
+
+    " 1c) JSON {"message":"..."} o {"descripcion":"..."}
+    IF cv_strmsg IS INITIAL.
+      FIND REGEX '"(message|descripcion|descripción)"\s*:\s*"([^"]+)"'
+        IN lv_full IGNORING CASE
+        SUBMATCHES lv_dummy lv_extr.
+      IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+        cv_strmsg = lv_extr.
+      ENDIF.
+    ENDIF.
+
+    " 1d) Genérico <error>...</error>
+    IF cv_strmsg IS INITIAL.
+      FIND REGEX '<error[^>]*>([^<]+)<'
+        IN lv_full IGNORING CASE
+        SUBMATCHES lv_extr.
+      IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+        cv_strmsg = lv_extr.
+      ENDIF.
+    ENDIF.
+
+    " 1e) Sin extracción “limpia”: corta el cuerpo
+    IF cv_strmsg IS INITIAL AND lv_full IS NOT INITIAL.
+      cv_strmsg = lv_full.
+      IF strlen( cv_strmsg ) > 1000.
+        cv_strmsg = cv_strmsg(1000) && ' ...'.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  " 2) Texto interno del proceso
+  IF cv_strmsg IS INITIAL AND iv_text_stat IS NOT INITIAL.
+    cv_strmsg = iv_text_stat.
+  ENDIF.
+
+  " 3) Último mensaje ABAP (si existe)
+  IF cv_strmsg IS INITIAL.
+    DATA lv_msgtxt TYPE string.
+    CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+      EXPORTING
+        msgid               = sy-msgid
+        msgnr               = sy-msgno
+        msgv1               = sy-msgv1
+        msgv2               = sy-msgv2
+        msgv3               = sy-msgv3
+        msgv4               = sy-msgv4
+      IMPORTING
+        message_text_output = lv_msgtxt
+      EXCEPTIONS
+        OTHERS              = 1.
+    IF sy-subrc = 0 AND lv_msgtxt IS NOT INITIAL.
+      cv_strmsg = lv_msgtxt.
+    ENDIF.
+  ENDIF.
+
+  IF cv_strmsg IS INITIAL.
+    cv_strmsg = 'Error de timbrado sin detalle devuelto por el PAC.'.
+  ENDIF.
+
+  CONDENSE cv_strmsg.
+ENDFORM.
+FORM update_req_response_pac_logica  USING
+
+                                  pwa_clientes    TYPE zsa1_cp1
+                                  p_lv_request    TYPE xstring
+                                  p_lv_response   TYPE xstring.
+
+  DATA:
+        wa_req_resp         TYPE zfit_filews_com.
+
+  wa_req_resp-numcomp    = pwa_clientes-numcomp.
+  wa_req_resp-bukrs      = pwa_clientes-bukrs.
+  wa_req_resp-kunnr      = pwa_clientes-kunnr.
+  wa_req_resp-ztpago     = pwa_clientes-ztpago.
+  wa_req_resp-anio_pago  = pwa_clientes-anio_pago.
+  wa_req_resp-request    = p_lv_request.
+  wa_req_resp-response   = p_lv_response.
+
+  MODIFY zfit_filews_com FROM  wa_req_resp.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Sincroniza en t_zta1_2 el estatus/UUID/fechas/rutas del pago timbr. *
+*---------------------------------------------------------------------*
+FORM f_sync_alv_line
+  USING    is_cli          TYPE zsa1_cp1
+           iv_stat         TYPE zta1_cp1-estatus
+           iv_uuid         TYPE zta1_cp1-uuid_comp
+           iv_fechatimbr   TYPE clike
+           iv_text_stat    TYPE clike.
+
+  FIELD-SYMBOLS <fs> TYPE zsa1_cp1.
+  DATA: lv_txt     TYPE zta1_cp1-text_est,
+        lv_pdf     TYPE string,
+        lv_xml     TYPE string,
+        lv_numcomp TYPE zta1_cp1-numcomp.
+
+  " Buscamos la misma fila en el ALV (t_zta1_2)
+  READ TABLE t_zta1_2 ASSIGNING <fs>
+       WITH KEY bukrs     = is_cli-bukrs
+                kunnr     = is_cli-kunnr
+                ztpago    = is_cli-ztpago
+                anio_pago = is_cli-anio_pago
+                ztfactrel = is_cli-ztfactrel
+                anio_fac  = is_cli-anio_fac.
+  IF sy-subrc <> 0 OR <fs> IS NOT ASSIGNED.
+    RETURN.
+  ENDIF.
+
+  " Estatus/Icono + texto
+  <fs>-estatus = iv_stat.
+  PERFORM f_fill_text_est USING    <fs>-estatus
+                                   iv_text_stat
+                          CHANGING lv_txt.
+  IF lv_txt IS INITIAL AND iv_stat = gc_icon_green.
+    lv_txt = 'Timbrado'.
+  ENDIF.
+  <fs>-text_est = lv_txt.
+
+  " UUID y fecha timbrado
+  <fs>-uuid_comp = iv_uuid.
+  <fs>-ztfetimb  = iv_fechatimbr.
+
+  " Asegurar NUMCOMP
+  IF <fs>-numcomp IS INITIAL.
+    lv_numcomp = is_cli-numcomp.
+  ELSE.
+    lv_numcomp = <fs>-numcomp.
+  ENDIF.
+
+  " Forzar rutas = NUMCOMP con extensión
+  lv_pdf = lv_numcomp.
+  lv_xml = lv_numcomp.
+  PERFORM f_ensure_extension USING 'pdf' CHANGING lv_pdf.
+  PERFORM f_ensure_extension USING 'xml' CHANGING lv_xml.
+
+  " Si usas carpeta fija, descomenta:
+  " CONCATENATE 'C:\Facturas\' lv_pdf INTO lv_pdf.
+  " CONCATENATE 'C:\Facturas\' lv_xml INTO lv_xml.
+
+  <fs>-ruta_pdf = lv_pdf.
+  <fs>-ruta_xml = lv_xml.
+
+  " Guardar cambios en la tabla
+  MODIFY t_zta1_2 FROM <fs> INDEX sy-tabix.
+
+ENDFORM.
+*---------------------------------------------------------------------*
+* Prepara parámetros para el SmartForm CFDI de CP                     *
+*---------------------------------------------------------------------*
+FORM f_prepare_sf_interface
+  USING
+        is_cli       TYPE zsa1_cp1
+        is_t001      TYPE ty_t001
+        is_adrc      TYPE ty_adrc
+        is_pago      TYPE zta1_cp1
+        is_sovos     TYPE zcp_sovos
+  CHANGING
+        cv_rfc_emisor  TYPE stcd1
+        cv_nom_emisor  TYPE string
+        cv_rfc_recep   TYPE stcd1
+        cv_nom_recep   TYPE string
+        cv_reg_fis_em  TYPE char5
+        cv_reg_fis_rec TYPE char3
+        cv_dom_fis     TYPE pstlz
+        cv_res_fis     TYPE t005-intca3
+        cs_zcfdit002   TYPE zcfdit002.
+
+  DATA: lv_rfc_em_s  TYPE string,
+        lv_nom_em_s  TYPE string,
+        lv_land1_s   TYPE land1,
+        lv_iso3      TYPE t005-intca3,
+        lv_kunnr     TYPE kunnr,
+        lv_reg_em_tv TYPE string,
+        lv_reg_re_tv TYPE string.
+
+  "=== Receptor (cliente)
+  cv_rfc_recep = is_cli-rfc_cl.
+  cv_nom_recep = is_cli-nombre.
+
+  IF cv_nom_recep IS INITIAL AND is_cli-kunnr IS NOT INITIAL.
+    lv_kunnr = is_cli-kunnr.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_kunnr
+      IMPORTING
+        output = lv_kunnr.
+    SELECT SINGLE name1
+           INTO @cv_nom_recep
+           FROM kna1
+           WHERE kunnr = @lv_kunnr.
+  ENDIF.
+
+  "=== Emisor (sociedad): intentar desde estructura recibida
+  PERFORM f_get_field_dyn_any USING is_t001 'STCD1|STCEG' CHANGING lv_rfc_em_s.
+  PERFORM f_get_field_dyn_any USING is_t001 'BUTXT'       CHANGING lv_nom_em_s.
+  PERFORM f_get_field_dyn_any USING is_t001 'LAND1'       CHANGING lv_land1_s.
+
+  " Si faltan datos, leer T001 de manera portable
+  IF ( lv_rfc_em_s IS INITIAL OR lv_nom_em_s IS INITIAL OR lv_land1_s IS INITIAL )
+     AND is_cli-bukrs IS NOT INITIAL.
+    PERFORM f_read_t001_portable
+      USING    is_cli-bukrs
+      CHANGING lv_rfc_em_s
+               lv_nom_em_s
+               lv_land1_s.
+  ENDIF.
+
+  cv_rfc_emisor = lv_rfc_em_s.
+  cv_nom_emisor = lv_nom_em_s.
+
+  "=== País ISO3
+  IF lv_land1_s IS NOT INITIAL.
+    SELECT SINGLE intca3
+           INTO @lv_iso3
+           FROM t005
+           WHERE land1 = @lv_land1_s.
+    IF sy-subrc = 0 AND lv_iso3 IS NOT INITIAL.
+      cv_res_fis = lv_iso3.
+    ENDIF.
+  ENDIF.
+
+  "=== Domicilio fiscal emisor (CP)
+  IF is_adrc IS NOT INITIAL.
+    cv_dom_fis = is_adrc-post_code1.
+  ENDIF.
+
+  "=== Régimen fiscal (defaults + override por TVARVC)
+  cv_reg_fis_em  = '601'.   " General de Ley Personas Morales
+  cv_reg_fis_rec = '616'.   " Sin obligaciones fiscales (ejemplo)
+
+  SELECT SINGLE low INTO @lv_reg_em_tv FROM tvarvc WHERE name = 'CFDI_REGFIS_EMI'.
+  IF sy-subrc = 0 AND lv_reg_em_tv IS NOT INITIAL.
+    cv_reg_fis_em = lv_reg_em_tv.
+  ENDIF.
+
+  SELECT SINGLE low INTO @lv_reg_re_tv FROM tvarvc WHERE name = 'CFDI_REGFIS_REC'.
+  IF sy-subrc = 0 AND lv_reg_re_tv IS NOT INITIAL.
+    cv_reg_fis_rec = lv_reg_re_tv.
+  ENDIF.
+
+  "=== ZCFDIT002 (QR / sellos): Sovos si existe, si no de la CP1
+  CLEAR cs_zcfdit002.
+  IF is_sovos IS NOT INITIAL.
+    cs_zcfdit002-version          = is_sovos-version.
+    cs_zcfdit002-uuid             = is_sovos-uuid.
+    cs_zcfdit002-fechatimbrado    = is_sovos-fechatimbrado.
+    cs_zcfdit002-nocertificadosat = is_sovos-nocertificadosat.
+    cs_zcfdit002-sellocfd         = is_sovos-sellocfd.
+    cs_zcfdit002-sellosat         = is_sovos-sellosat.
+    cs_zcfdit002-rfcemisor        = is_sovos-rfcemisor.
+    cs_zcfdit002-rfcreceptor      = is_sovos-rfcreceptor.
+    cs_zcfdit002-total_compr      = is_sovos-total_compr.
+    cs_zcfdit002-code_qr          = is_sovos-code_qr.
+  ELSE.
+    cs_zcfdit002-uuid          = is_pago-uuid_comp.
+    cs_zcfdit002-fechatimbrado = is_pago-ztfetimb.
+  ENDIF.
+
+  " Normalizar RFC a mayúsculas
+  TRANSLATE cv_rfc_emisor TO UPPER CASE.
+  TRANSLATE cv_rfc_recep  TO UPPER CASE.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Lee T001 portable (sin asumir STCD1). Devuelve RFC, BUTXT, LAND1.   *
+*---------------------------------------------------------------------*
+FORM f_read_t001_portable
+  USING    iv_bukrs      TYPE bukrs
+  CHANGING cv_rfc        TYPE string
+           cv_butxt      TYPE string
+           cv_land1      TYPE land1.
+
+  DATA: ls_t001 TYPE t001.
+  FIELD-SYMBOLS <f_any> TYPE any.
+
+  CLEAR: cv_rfc, cv_butxt, cv_land1.
+  IF iv_bukrs IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT SINGLE *
+    INTO @ls_t001
+    FROM t001
+    WHERE bukrs = @iv_bukrs.
+
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  cv_butxt = ls_t001-butxt.
+  cv_land1 = ls_t001-land1.
+
+  " RFC: intenta STCD1, si no existe/está vacío intenta STCEG
+  ASSIGN COMPONENT 'STCD1' OF STRUCTURE ls_t001 TO <f_any>.
+  IF sy-subrc = 0 AND <f_any> IS ASSIGNED AND <f_any> IS NOT INITIAL.
+    cv_rfc = <f_any>.
+  ELSE.
+    ASSIGN COMPONENT 'STCEG' OF STRUCTURE ls_t001 TO <f_any>.
+    IF sy-subrc = 0 AND <f_any> IS ASSIGNED AND <f_any> IS NOT INITIAL.
+      cv_rfc = <f_any>.
+    ENDIF.
+  ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+* Arma el mejor texto de error (PAC -> texto -> MSG) con SY-MSG*      *
+*---------------------------------------------------------------------*
+FORM f_pick_error_text_ex
+  USING    iv_resp_xstr TYPE xstring   "Respuesta cruda del PAC (xstr)
+           iv_text_stat TYPE clike     "Texto de estatus interno
+           iv_msgid     TYPE symsgid   "Capturados en el momento del error
+           iv_msgno     TYPE symsgno
+           iv_msgv1     TYPE any
+           iv_msgv2     TYPE any
+           iv_msgv3     TYPE any
+           iv_msgv4     TYPE any
+  CHANGING cv_strmsg    TYPE string.   "Resultado final legible
+
+  DATA: lv_full  TYPE string,
+        lv_extr  TYPE string,
+        lv_dummy TYPE string.
+
+  CLEAR cv_strmsg.
+
+  " 1) PAC -> xstring a string + extracción por regex
+  IF iv_resp_xstr IS NOT INITIAL.
+    PERFORM zconv_xstr_to_str USING iv_resp_xstr CHANGING lv_full.
+
+    " Atributo key="valor"
+    FIND REGEX '(Descripcion|Descripción|Mensaje|message|faultstring)\s*=\s*"([^"]+)"'
+      IN lv_full IGNORING CASE SUBMATCHES lv_dummy lv_extr.
+    IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+      cv_strmsg = lv_extr.
+    ENDIF.
+
+    " Etiqueta <key>valor</key>
+    IF cv_strmsg IS INITIAL.
+      FIND REGEX '<(Descripcion|Descripción|Mensaje|message|faultstring)[^>]*>([^<]+)<'
+        IN lv_full IGNORING CASE SUBMATCHES lv_dummy lv_extr.
+      IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+        cv_strmsg = lv_extr.
+      ENDIF.
+    ENDIF.
+
+    " JSON {"message":"..."} o {"descripcion":"..."}
+    IF cv_strmsg IS INITIAL.
+      FIND REGEX '"(message|descripcion|descripción)"\s*:\s*"([^"]+)"'
+        IN lv_full IGNORING CASE SUBMATCHES lv_dummy lv_extr.
+      IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+        cv_strmsg = lv_extr.
+      ENDIF.
+    ENDIF.
+
+    " Genérico <error>...</error>
+    IF cv_strmsg IS INITIAL.
+      FIND REGEX '<error[^>]*>([^<]+)<'
+        IN lv_full IGNORING CASE SUBMATCHES lv_extr.
+      IF sy-subrc = 0 AND lv_extr IS NOT INITIAL.
+        cv_strmsg = lv_extr.
+      ENDIF.
+    ENDIF.
+
+    " Si no hubo extracción limpia, corta cuerpo para no saturar
+    IF cv_strmsg IS INITIAL AND lv_full IS NOT INITIAL.
+      cv_strmsg = lv_full.
+      IF strlen( cv_strmsg ) > 1000.
+        cv_strmsg = cv_strmsg(1000) && ' ...'.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  " 2) Texto de estatus interno
+  IF cv_strmsg IS INITIAL AND iv_text_stat IS NOT INITIAL.
+    cv_strmsg = iv_text_stat.
+  ENDIF.
+
+  " 3) Mensaje ABAP capturado en el momento del error (NO usar SY-* tardío)
+  IF cv_strmsg IS INITIAL AND iv_msgid IS NOT INITIAL.
+    DATA lv_msgtxt TYPE string.
+    CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+      EXPORTING
+        msgid               = iv_msgid
+        msgnr               = iv_msgno
+        msgv1               = iv_msgv1
+        msgv2               = iv_msgv2
+        msgv3               = iv_msgv3
+        msgv4               = iv_msgv4
+      IMPORTING
+        message_text_output = lv_msgtxt
+      EXCEPTIONS
+        OTHERS              = 1.
+    IF sy-subrc = 0 AND lv_msgtxt IS NOT INITIAL.
+      cv_strmsg = lv_msgtxt.
+    ENDIF.
+  ENDIF.
+
+  IF cv_strmsg IS INITIAL.
+    cv_strmsg = 'Error de timbrado sin detalle devuelto por el PAC.'.
+  ENDIF.
+
+  CONDENSE cv_strmsg.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Muestra popup de error con contexto del documento                   *
+*---------------------------------------------------------------------*
+FORM f_show_error_detail
+  USING    is_cli       TYPE zsa1_cp1
+           iv_resp_xstr TYPE xstring
+           iv_text_stat TYPE clike
+           iv_title     TYPE clike
+           iv_msgid     TYPE symsgid
+           iv_msgno     TYPE symsgno
+           iv_msgv1     TYPE any
+           iv_msgv2     TYPE any
+           iv_msgv3     TYPE any
+           iv_msgv4     TYPE any.
+
+  DATA: lv_str TYPE string,
+        lv_x   TYPE xstring.
+
+  PERFORM f_pick_error_text_ex USING
+          iv_resp_xstr iv_text_stat
+          iv_msgid iv_msgno iv_msgv1 iv_msgv2 iv_msgv3 iv_msgv4
+        CHANGING lv_str.
+
+  DATA(lv_ctx) =
+    |Último doc con error -> Sociedad={ is_cli-bukrs }  Cliente={ is_cli-kunnr }  Pago={ is_cli-ztpago }|.
+  CONCATENATE lv_ctx lv_str INTO lv_str SEPARATED BY cl_abap_char_utilities=>newline.
+
+  PERFORM zconv_str_to_xstr USING lv_str CHANGING lv_x.
+  PERFORM show_xml_popup USING lv_x iv_title.
+ENDFORM.
+FORM f_show_error_resstr
+  USING    is_cli    TYPE zsa1_cp1
+           iv_resstr TYPE string
+           iv_title  TYPE clike.
+
+  DATA: lv_x   TYPE xstring,
+        lv_str TYPE string,
+        lv_ctx TYPE string,
+        lv_nl  TYPE string.
+
+  lv_nl = cl_abap_char_utilities=>newline.
+
+  " Contexto: Sociedad / Cliente / Pago
+  CONCATENATE
+      'Último doc con error -> Sociedad=' is_cli-bukrs
+      'Cliente=' is_cli-kunnr
+      'Pago='    is_cli-ztpago
+    INTO lv_ctx SEPARATED BY space.
+
+  IF iv_resstr IS INITIAL.
+    lv_str = lv_ctx.
+  ELSE.
+    CONCATENATE lv_ctx lv_nl 'Detalle PAC (resstr):' lv_nl iv_resstr
+      INTO lv_str SEPARATED BY space.
+  ENDIF.
+
+  PERFORM zconv_str_to_xstr USING lv_str CHANGING lv_x.
+  PERFORM show_xml_popup USING lv_x iv_title.
+ENDFORM.
+
+
+*----------------------------------------------------------------------
+*  Muestra el PDF del SmartForm ZFISF_DOCTIMB3_VIKO con datos completos
+*----------------------------------------------------------------------
+FORM f_visualiza_pdf_en_pantalla
+  USING    lwa_zta1_2 TYPE zsa1_cp1
+           lv_fname   TYPE string.
+
+  "================= Declaraciones =================
+  DATA: lv_formname    TYPE tdsfname VALUE 'ZFISF_DOCTIMB3_VIKO',
+        lv_fm_name     TYPE rs38l_fnam,
+        lwa_ctrl       TYPE ssfctrlop,
+        lwa_comp       TYPE ssfcompop,
+        lwa_otf        TYPE ssfcrescl,      " OTFDATA (ITCOO)
+        v_bin_filesize TYPE i.
+
+  " === Emisor / Receptor / Timbre (TIPOS EXACTOS DEL SF) ============
+  DATA: lv_rfc_receptor TYPE zsa1_cp1-rfc_cl,
+        lv_nom_receptor TYPE zsa1_cp1-nombre,
+        lv_rfc_emisor   TYPE t001z-paval,
+        lv_nom_emisor   TYPE t001-butxt,
+        lv_reg_fis      TYPE char5,
+        lv_regimen      TYPE char3,
+        lv_pais         TYPE t005-intca3,
+        lv_dom          TYPE kna1-pstlz,
+        lv_lug_exp      TYPE adrc-post_code1,
+        lv_uuid         TYPE zta1_cp1-uuid_comp,
+        lv_fechat       TYPE zfid_fe_tim,
+        lv_cadena_org   TYPE string.
+
+  " Maestro empresa y dirección
+  DATA: ls_t001  TYPE t001,
+        ls_adrc  TYPE adrc,
+        lv_land1 TYPE land1.
+
+  " Tablas para el SmartForm
+  DATA: lt_pagos TYPE ztta1_cp1,
+        lt_fac   TYPE ztta1_cp1.
+
+  " Sovos / CFDI timbre
+  DATA: lt_zcp_sovos TYPE STANDARD TABLE OF zcp_sovos,
+        wa_zcp_sovos TYPE zcp_sovos,
+        wa_zcfdit002 TYPE zcfdit002.
+
+  " GUI
+  DATA: lv_suggest_name TYPE string,
+        lv_path         TYPE string,
+        lv_full_path    TYPE string.
+
+  " Auxiliares
+  DATA: lv_kunnr TYPE kunnr,
+        ls_kna1  TYPE kna1.
+
+  "================= 1) Parámetros impresión =========================
+  SELECT SINGLE low INTO lv_formname FROM tvarvc WHERE name = 'CFDI40CP_PDF'.
+  IF sy-subrc <> 0 OR lv_formname IS INITIAL.
+    lv_formname = 'ZFISF_DOCTIMB3_VIKO'.
+  ENDIF.
+
+  CLEAR: lwa_ctrl, lwa_comp.
+  lwa_ctrl-getotf     = 'X'.
+  lwa_ctrl-no_dialog  = 'X'.
+  lwa_comp-tdimmed    = 'X'.
+  lwa_comp-tddelete   = 'X'.
+
+  "================= 2) Receptor (estructura y respaldo KNA1) ========
+  lv_rfc_receptor = lwa_zta1_2-rfc_cl.
+  lv_nom_receptor = lwa_zta1_2-nombre.
+
+  IF lv_rfc_receptor IS INITIAL OR lv_nom_receptor IS INITIAL.
+    lv_kunnr = lwa_zta1_2-kunnr.
+    IF lv_kunnr IS NOT INITIAL.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lv_kunnr
+        IMPORTING
+          output = lv_kunnr.
+      SELECT SINGLE * INTO ls_kna1 FROM kna1 WHERE kunnr = lv_kunnr.
+      IF sy-subrc = 0.
+        IF lv_nom_receptor IS INITIAL AND ls_kna1-name1 IS NOT INITIAL.
+          lv_nom_receptor = ls_kna1-name1.
+        ENDIF.
+        IF lv_rfc_receptor IS INITIAL.
+          FIELD-SYMBOLS <f_stcd1> TYPE any.
+          ASSIGN COMPONENT 'STCD1' OF STRUCTURE ls_kna1 TO <f_stcd1>.
+          IF sy-subrc = 0 AND <f_stcd1> IS ASSIGNED AND <f_stcd1> IS NOT INITIAL.
+            lv_rfc_receptor = <f_stcd1>.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  "================= 3) Emisor: T001Z/T001/ADRC/T005 =================
+  SELECT SINGLE * INTO ls_t001 FROM t001 WHERE bukrs = lwa_zta1_2-bukrs.
+  IF sy-subrc = 0.
+    lv_land1      = ls_t001-land1.
+    lv_nom_emisor = ls_t001-butxt.
+
+    " RFC Emisor preferente: T001Z-PAVAL
+    SELECT SINGLE paval INTO lv_rfc_emisor FROM t001z WHERE bukrs = ls_t001-bukrs.
+
+    " Respaldo: STCEG (si existe) en T001
+    IF lv_rfc_emisor IS INITIAL.
+      SELECT SINGLE stceg INTO lv_rfc_emisor FROM t001 WHERE bukrs = ls_t001-bukrs.
+    ENDIF.
+
+    " Dirección/Lugar expedición
+    IF ls_t001-adrnr IS NOT INITIAL.
+      SELECT SINGLE * INTO ls_adrc FROM adrc WHERE addrnumber = ls_t001-adrnr.
+      IF sy-subrc = 0.
+        lv_dom     = ls_adrc-post_code1.
+        lv_lug_exp = ls_adrc-post_code1.
+        IF lv_nom_emisor IS INITIAL AND ls_adrc-name1 IS NOT INITIAL.
+          lv_nom_emisor = ls_adrc-name1.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " País ISO A3
+    IF lv_land1 IS NOT INITIAL.
+      SELECT SINGLE intca3 INTO lv_pais FROM t005 WHERE land1 = lv_land1.
+    ENDIF.
+  ENDIF.
+
+  " Defaults seguros (evita vacíos al SF)
+  IF lv_nom_emisor   IS INITIAL. lv_nom_emisor   = 'N/A'.            ENDIF.
+  IF lv_rfc_emisor   IS INITIAL. lv_rfc_emisor   = 'XAXX010101000'.  ENDIF.
+  IF lv_pais         IS INITIAL. lv_pais         = 'MEX'.            ENDIF.
+  IF lv_dom          IS INITIAL. lv_dom          = '00000'.          ENDIF.
+  IF lv_lug_exp      IS INITIAL. lv_lug_exp      = lv_dom.           ENDIF.
+  IF lv_reg_fis      IS INITIAL. lv_reg_fis      = '601'.            ENDIF.
+  IF lv_regimen      IS INITIAL. lv_regimen      = '601'.            ENDIF.
+  IF lv_nom_receptor IS INITIAL. lv_nom_receptor = 'N/A'.            ENDIF.
+  IF lv_rfc_receptor IS INITIAL. lv_rfc_receptor = 'XAXX010101000'.  ENDIF.
+
+  "================= 4) Cargar tablas y timbre =======================
+  SELECT * FROM zta1_cp1 INTO TABLE lt_pagos WHERE numcomp = lwa_zta1_2-numcomp.
+  lt_fac = lt_pagos.
+
+  " SOVOS (para QR/sellos/fecha timbrado/cadena)
+  SELECT * FROM zcp_sovos INTO TABLE lt_zcp_sovos
+   WHERE bukrs = lwa_zta1_2-bukrs AND numcomp = lwa_zta1_2-numcomp.
+  IF sy-subrc = 0.
+    READ TABLE lt_zcp_sovos INTO wa_zcp_sovos INDEX 1.
+  ENDIF.
+
+  " Mapear Sovos -> ZCFDIT002
+  CLEAR wa_zcfdit002.
+  IF wa_zcp_sovos IS NOT INITIAL.
+    wa_zcfdit002-version          = wa_zcp_sovos-version.
+    wa_zcfdit002-uuid             = wa_zcp_sovos-uuid.
+    wa_zcfdit002-fechatimbrado    = wa_zcp_sovos-fechatimbrado.
+    wa_zcfdit002-nocertificadosat = wa_zcp_sovos-nocertificadosat.
+    wa_zcfdit002-sellocfd         = wa_zcp_sovos-sellocfd.
+    wa_zcfdit002-sellosat         = wa_zcp_sovos-sellosat.
+    wa_zcfdit002-rfcemisor        = wa_zcp_sovos-rfcemisor.
+    wa_zcfdit002-rfcreceptor      = wa_zcp_sovos-rfcreceptor.
+    wa_zcfdit002-total_compr      = wa_zcp_sovos-total_compr.
+    wa_zcfdit002-code_qr          = wa_zcp_sovos-code_qr.
+  ENDIF.
+
+  " UUID / Fecha / Cadena
+  lv_uuid       = wa_zcp_sovos-uuid.
+  lv_fechat     = wa_zcp_sovos-fechatimbrado.
+  lv_cadena_org = wa_zcp_sovos-cadena_original.
+
+  IF ( lv_uuid IS INITIAL OR lv_fechat IS INITIAL ) AND lt_pagos IS NOT INITIAL.
+    DATA ls_pago TYPE zta1_cp1.
+    READ TABLE lt_pagos INTO ls_pago INDEX 1.
+    IF sy-subrc = 0.
+      IF lv_uuid   IS INITIAL AND ls_pago-uuid_comp IS NOT INITIAL.
+        lv_uuid = ls_pago-uuid_comp.
+      ENDIF.
+      IF lv_fechat IS INITIAL AND ls_pago-ztfetimb IS NOT INITIAL.
+        lv_fechat = ls_pago-ztfetimb.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  IF lv_uuid       IS INITIAL. lv_uuid       = '00000000-0000-0000-0000-000000000000'. ENDIF.
+  IF lv_cadena_org IS INITIAL. lv_cadena_org = ''. ENDIF.
+
+  "================= 5) Resolver FM del SmartForm ====================
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING
+      formname           = lv_formname
+    IMPORTING
+      fm_name            = lv_fm_name
+    EXCEPTIONS
+      no_form            = 1
+      no_function_module = 2
+      OTHERS             = 3.
+  IF sy-subrc <> 0 OR lv_fm_name IS INITIAL.
+    MESSAGE e398(00) WITH 'No se pudo resolver el SmartForm' lv_formname.
+    RETURN.
+  ENDIF.
+
+  "================= 6) Llamar SmartForm → OTF ======================
+  CALL FUNCTION lv_fm_name
+    EXPORTING
+      control_parameters = lwa_ctrl
+      output_options     = lwa_comp
+      user_settings      = ' '
+      pwa_clientes       = lwa_zta1_2
+      p_rfc_receptor     = lv_rfc_receptor
+      p_nom_receptor     = lv_nom_receptor
+      p_rfc_emisor       = lv_rfc_emisor
+      p_nom_emisor       = lv_nom_emisor
+      p_reg_fis          = lv_reg_fis
+      p_reg_fisr         = lv_regimen
+      p_dom_fis          = lv_dom
+      p_res_fis          = lv_pais
+      p_lug_exp          = lv_lug_exp
+      pwa_zcfdit002      = wa_zcfdit002
+      p_sust             = space
+      p_uuide            = lv_uuid
+      p_fechat           = lv_fechat
+      pwa_zcp_sovos      = wa_zcp_sovos          " OBLIGATORIO EN TU SF
+      p_cadena_org       = lv_cadena_org
+    IMPORTING
+      job_output_info    = lwa_otf
+    TABLES
+      pt_pagos           = lt_pagos               " ZTTA1_CP1
+      pt_fac             = lt_fac                 " ZTTA1_CP1
+      pt_fac2            = t_zta1_aux             " como en TEMP (mismo tipo del SF)
+*     pt_zcp_sovos       = lt_zcp_sovos           " descomenta si tu SF lo declara
+    EXCEPTIONS
+      formatting_error   = 1
+      internal_error     = 2
+      send_error         = 3
+      user_canceled      = 4
+      OTHERS             = 5.
+  IF sy-subrc <> 0.
+    MESSAGE e398(00) WITH 'Error al ejecutar SmartForm' lv_formname.
+    RETURN.
+  ENDIF.
+  IF lwa_otf-otfdata IS INITIAL.
+    MESSAGE e398(00) WITH 'El SmartForm no devolvió OTF (GETOTF = X)'.
+    RETURN.
+  ENDIF.
+
+  "================= 7) OTF → PDF usando CONVERT_OTF (firma antigua) =
+  " Tu sistema no tiene BIN_FILE ni CL_BCS_CONVERT público: usamos LINES (TLINE)
+  DATA: lt_pdf_lines TYPE STANDARD TABLE OF tline.
+  CLEAR: lt_pdf_lines, v_bin_filesize.
+
+  CALL FUNCTION 'CONVERT_OTF'
+    EXPORTING
+      format                = 'PDF'
+    IMPORTING
+      bin_filesize          = v_bin_filesize
+    TABLES
+      otf                   = lwa_otf-otfdata
+      lines                 = lt_pdf_lines
+    EXCEPTIONS
+      err_max_linewidth     = 1
+      err_format            = 2
+      err_conv_not_possible = 3
+      err_bad_otf           = 4
+      OTHERS                = 5.
+  IF sy-subrc <> 0 OR lt_pdf_lines IS INITIAL.
+    MESSAGE e398(00) WITH 'Fallo al convertir OTF a PDF (CONVERT_OTF/LINES)'.
+    RETURN.
+  ENDIF.
+
+  "================= 8) Guardar en carpeta TEMP y abrir ===============
+  DATA lv_full_path_tmp TYPE string.
+
+  PERFORM f_build_pdf_filename USING lwa_zta1_2 lv_fname
+                         CHANGING lv_full_path_tmp.
+
+  IF lv_full_path_tmp IS NOT INITIAL.
+    CALL METHOD cl_gui_frontend_services=>gui_download
+      EXPORTING
+        filename     = lv_full_path_tmp
+        filetype     = 'BIN'
+        bin_filesize = v_bin_filesize
+      CHANGING
+        data_tab     = lt_pdf_lines
+      EXCEPTIONS
+        OTHERS       = 1.
+
+    " Abre el PDF
+    CALL METHOD cl_gui_frontend_services=>execute
+      EXPORTING
+        document  = lv_full_path_tmp
+        operation = 'OPEN'
+      EXCEPTIONS
+        OTHERS    = 1.
+  ENDIF.
+
+
+
+ENDFORM.
+
+
+
+
+*----------------------------------------------------------------------
+* Recupera Emisor/Receptor de forma robusta (sin listas de campos)
+*----------------------------------------------------------------------
+FORM f_resolver_emisor_receptor
+  USING    i_cliente       TYPE zsa1_cp1
+  CHANGING cv_rfc_emisor   TYPE paval
+           cv_nom_emisor   TYPE string
+           cv_rfc_receptor TYPE string
+           cv_nom_receptor TYPE string.
+
+  FIELD-SYMBOLS: <fs_any> TYPE any, <fs_cmp> TYPE any, <fv> TYPE any.
+  ASSIGN i_cliente TO <fs_any>.
+
+  "---------------- Receptor desde la estructura ----------------
+  IF cv_rfc_receptor IS INITIAL.
+    ASSIGN COMPONENT 'RFC_CL'        OF STRUCTURE <fs_any> TO <fs_cmp>.
+    IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED AND <fs_cmp> IS NOT INITIAL.
+      cv_rfc_receptor = <fs_cmp>.
+    ENDIF.
+  ENDIF.
+  IF cv_rfc_receptor IS INITIAL.
+    ASSIGN COMPONENT 'RFC_RECEPTOR'  OF STRUCTURE <fs_any> TO <fs_cmp>.
+    IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED AND <fs_cmp> IS NOT INITIAL.
+      cv_rfc_receptor = <fs_cmp>.
+    ENDIF.
+  ENDIF.
+
+  IF cv_nom_receptor IS INITIAL.
+    ASSIGN COMPONENT 'NOMBRE'        OF STRUCTURE <fs_any> TO <fs_cmp>.
+    IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED AND <fs_cmp> IS NOT INITIAL.
+      cv_nom_receptor = <fs_cmp>.
+    ENDIF.
+  ENDIF.
+  IF cv_nom_receptor IS INITIAL.
+    ASSIGN COMPONENT 'NOMRECEPTOR'   OF STRUCTURE <fs_any> TO <fs_cmp>.
+    IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED AND <fs_cmp> IS NOT INITIAL.
+      cv_nom_receptor = <fs_cmp>.
+    ENDIF.
+  ENDIF.
+
+  "---------------- Receptor desde KNA1 (SELECT * seguro) ----------------
+  IF cv_rfc_receptor IS INITIAL OR cv_nom_receptor IS INITIAL.
+    DATA lv_kunnr TYPE kunnr.
+    ASSIGN COMPONENT 'KUNNR' OF STRUCTURE <fs_any> TO <fs_cmp>.
+    IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED. lv_kunnr = <fs_cmp>. ENDIF.
+
+    IF lv_kunnr IS NOT INITIAL.
+      DATA ls_kna1 TYPE kna1.
+      SELECT SINGLE *
+        FROM kna1
+        INTO @ls_kna1
+       WHERE kunnr = @lv_kunnr.
+
+      IF sy-subrc = 0.
+        " Nombre (estático)
+        IF cv_nom_receptor IS INITIAL AND ls_kna1-name1 IS NOT INITIAL.
+          cv_nom_receptor = ls_kna1-name1.
+        ENDIF.
+
+        " RFC receptor: intentar STCD1 de forma DINÁMICA (no falla si no existe)
+        IF cv_rfc_receptor IS INITIAL.
+          ASSIGN COMPONENT 'STCD1' OF STRUCTURE ls_kna1 TO <fv>.
+          IF sy-subrc = 0 AND <fv> IS ASSIGNED AND <fv> IS NOT INITIAL.
+            cv_rfc_receptor = <fv>.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  "---------------- Emisor desde T001/T001Z (SELECT * seguro) --------------
+  DATA lv_bukrs TYPE bukrs.
+  ASSIGN COMPONENT 'BUKRS' OF STRUCTURE <fs_any> TO <fs_cmp>.
+  IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED. lv_bukrs = <fs_cmp>. ENDIF.
+
+  IF lv_bukrs IS NOT INITIAL.
+    DATA ls_t001 TYPE t001.
+    SELECT SINGLE *
+      FROM t001
+      INTO @ls_t001
+     WHERE bukrs = @lv_bukrs.
+
+    IF sy-subrc = 0.
+      " Nombre emisor
+      IF cv_nom_emisor IS INITIAL AND ls_t001-butxt IS NOT INITIAL.
+        cv_nom_emisor = ls_t001-butxt.
+      ENDIF.
+
+      " RFC emisor preferente: T001Z-PAVAL
+      IF cv_rfc_emisor IS INITIAL.
+        SELECT SINGLE paval
+          FROM t001z
+          INTO @cv_rfc_emisor
+         WHERE bukrs = @ls_t001-bukrs.
+      ENDIF.
+
+      " Respaldo: intenta STCEG en T001 (si existe) de forma DINÁMICA
+      IF cv_rfc_emisor IS INITIAL.
+        ASSIGN COMPONENT 'STCEG' OF STRUCTURE ls_t001 TO <fv>.
+        IF sy-subrc = 0 AND <fv> IS ASSIGNED AND <fv> IS NOT INITIAL.
+          cv_rfc_emisor = <fv>.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  "---------------- Defaults para no dejar vacíos ----------------
+  IF cv_nom_receptor IS INITIAL. cv_nom_receptor = 'N/A'.           ENDIF.
+  IF cv_rfc_receptor IS INITIAL. cv_rfc_receptor = 'XAXX010101000'. ENDIF.
+  IF cv_nom_emisor   IS INITIAL. cv_nom_emisor   = 'N/A'.           ENDIF.
+  IF cv_rfc_emisor   IS INITIAL. cv_rfc_emisor   = 'XAXX010101000'. ENDIF.
+
+ENDFORM.
+
+*----------------------------------------------------------------------
+*  Helper: cargar tablas del SmartForm (sin conflictos de tipos)
+*----------------------------------------------------------------------
+FORM f_cargar_tablas_sf
+  USING    i_cliente TYPE zsa1_cp1
+  CHANGING ct_pagos  TYPE ztta1_cp1
+           ct_fac    TYPE ztta1_cp1
+           ct_fac2   TYPE ztta1_cp1.
+
+  FIELD-SYMBOLS: <fs_any> TYPE any, <fs_cmp> TYPE any.
+  ASSIGN i_cliente TO <fs_any>.
+
+  " Variables del MISMO tipo de línea que cada tabla
+  DATA: ls_pagos_line LIKE LINE OF ct_pagos,
+        ls_fac_line   LIKE LINE OF ct_fac,
+        ls_fac2_line  LIKE LINE OF ct_fac2.
+
+  " 1) Asegurar FAC2 con el registro actual, pero convirtiendo el tipo
+  CLEAR ls_fac2_line.
+  MOVE-CORRESPONDING i_cliente TO ls_fac2_line.
+  IF ls_fac2_line IS NOT INITIAL.
+    APPEND ls_fac2_line TO ct_fac2.
+  ENDIF.
+
+  " 2) Cargar más líneas desde ZTA1_CP1 con el mismo NUMCOMP
+  DATA lv_numcomp TYPE string.
+  ASSIGN COMPONENT 'NUMCOMP' OF STRUCTURE <fs_any> TO <fs_cmp>.
+  IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED AND <fs_cmp> IS NOT INITIAL.
+    lv_numcomp = <fs_cmp>.
+  ENDIF.
+  IF lv_numcomp IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " New Open SQL: host vars con @ y comas
+  SELECT *
+    FROM zta1_cp1
+    INTO TABLE @DATA(lt_zta1)
+   WHERE numcomp = @lv_numcomp.
+
+  LOOP AT lt_zta1 ASSIGNING FIELD-SYMBOL(<ls_zta1>).
+    FIELD-SYMBOLS <f_pago>  TYPE any.
+    FIELD-SYMBOLS <f_total> TYPE any.
+
+    ASSIGN COMPONENT 'IMP_PAGO' OF STRUCTURE <ls_zta1> TO <f_pago>.
+    ASSIGN COMPONENT 'TOTAL'    OF STRUCTURE <ls_zta1> TO <f_total>.
+
+    IF <f_pago> IS ASSIGNED AND <f_pago> IS NOT INITIAL.
+      CLEAR ls_pagos_line.
+      MOVE-CORRESPONDING <ls_zta1> TO ls_pagos_line.
+      APPEND ls_pagos_line TO ct_pagos.
+      CONTINUE.
+    ENDIF.
+
+    IF <f_total> IS ASSIGNED AND <f_total> IS NOT INITIAL.
+      CLEAR ls_fac_line.
+      MOVE-CORRESPONDING <ls_zta1> TO ls_fac_line.
+      APPEND ls_fac_line TO ct_fac.
+      CONTINUE.
+    ENDIF.
+
+    CLEAR ls_fac2_line.
+    MOVE-CORRESPONDING <ls_zta1> TO ls_fac2_line.
+    APPEND ls_fac2_line TO ct_fac2.
+  ENDLOOP.
+
+ENDFORM.
+
+
+*----------------------------------------------------------------------
+*  Helper: nombre/ruta segura en carpeta temporal del frontend
+*----------------------------------------------------------------------
+*----------------------------------------------------------------------
+*  Helper: nombre/ruta segura en carpeta temporal del frontend
+*----------------------------------------------------------------------
+*---------------------------------------------------------------------*
+*  Helper: nombre/ruta segura en carpeta temporal del frontend
+*---------------------------------------------------------------------*
+FORM f_build_pdf_filename
+  USING    i_cliente TYPE zsa1_cp1
+           i_fname   TYPE string
+  CHANGING cv_full   TYPE string.
+
+  DATA: lv_name TYPE string,
+        lv_sep  TYPE c LENGTH 1,
+        lv_len  TYPE i,
+        lv_off  TYPE i,
+        lv_last TYPE c LENGTH 1.
+
+  " Nombre sugerido
+  IF i_fname IS NOT INITIAL.
+    lv_name = i_fname.
+  ELSE.
+    FIELD-SYMBOLS: <fs_any> TYPE any, <fs_cmp> TYPE any.
+    ASSIGN i_cliente TO <fs_any>.
+    ASSIGN COMPONENT 'NUMCOMP' OF STRUCTURE <fs_any> TO <fs_cmp>.
+    IF sy-subrc = 0 AND <fs_cmp> IS ASSIGNED AND <fs_cmp> IS NOT INITIAL.
+      lv_name = <fs_cmp>.
+    ELSE.
+      lv_name = 'smartform'.
+    ENDIF.
+  ENDIF.
+
+  " Sanea y asegura .pdf
+  REPLACE ALL OCCURRENCES OF REGEX '[\\/:*?"<>|]' IN lv_name WITH '_'.
+  IF lv_name NP '*.pdf'.
+    CONCATENATE lv_name '.pdf' INTO lv_name.
+  ENDIF.
+
+  " ¡IMPORTANTE!: usar variable GLOBAL para el CHANGING
+  CLEAR gv_temp_dir.
+  TRY.
+      cl_gui_frontend_services=>get_temp_directory(
+        CHANGING temp_dir = gv_temp_dir ).
+      cl_gui_cfw=>flush( ).  " asegura el retorno antes de salir
+    CATCH cx_root.
+      CLEAR gv_temp_dir.
+  ENDTRY.
+
+  " Si no hay GUI o falló, usa solo el nombre
+  IF gv_temp_dir IS INITIAL.
+    cv_full = lv_name.
+    RETURN.
+  ENDIF.
+
+  " Separador según la ruta devuelta
+  lv_sep = '/'.
+  IF gv_temp_dir CS '\'.
+    lv_sep = '\'.
+  ENDIF.
+
+  lv_len = strlen( gv_temp_dir ).
+  IF lv_len > 0.
+    lv_off  = lv_len - 1.
+    lv_last = gv_temp_dir+lv_off(1).
+  ENDIF.
+
+  IF lv_last = lv_sep.
+    CONCATENATE gv_temp_dir lv_name INTO cv_full.
+  ELSE.
+    CONCATENATE gv_temp_dir lv_sep lv_name INTO cv_full.
+  ENDIF.
+ENDFORM.
+*---------------------------------------------------------------------*
+* FORM f_open_pac_resstr_xml
+*  - Extrae XML de resstr (InnerErrors si existe)
+*  - Lo indenta
+*  - Lo guarda en SAP GUI\tmp como CP<NUMCOMP>_ERROR.xml
+*  - Lo abre con la app por defecto (igual que en éxito)
+*---------------------------------------------------------------------*
+
+*---------------------------------------------------------------------*
+* FORM f_open_pac_resstr_xml
+*  - Extrae XML de resstr (InnerErrors si existe)
+*  - Lo indenta
+*  - Lo guarda en carpeta "como éxito" como CP<NUMCOMP>_ERROR.xml (UTF-8 BIN)
+*  - Lo abre con la app por defecto
+*---------------------------------------------------------------------*
+FORM f_open_pac_resstr_xml
+  USING    iv_resstr   TYPE string
+           iv_bukrs    TYPE bukrs
+           iv_numcomp  TYPE znumcomp
+           iv_title    TYPE string.
+
+  DATA: lv_in_str     TYPE string,
+        lv_xml_err    TYPE string,
+        lv_xml_pretty TYPE string,
+        lv_nl         TYPE string VALUE cl_abap_char_utilities=>newline,
+        lv_end_tag    TYPE string VALUE '</InnerErrors>',
+        lv_off_start  TYPE i,
+        lv_off_end    TYPE i,
+        lv_end_len    TYPE i,
+        lv_len        TYPE i.
+
+  DATA: lv_dir     TYPE string,
+        lv_file    TYPE string,
+        lv_base    TYPE string,
+        lv_upper   TYPE string,
+        lv_exec_rc TYPE i.
+
+  " 0) Validar entrada
+  lv_in_str = iv_resstr.
+  IF lv_in_str IS INITIAL.
+    MESSAGE w398(00) WITH 'Cadena de respuesta vacía; no hay XML para mostrar.'.
+    RETURN.
+  ENDIF.
+
+  " 1) Tomar específicamente <InnerErrors>... si existe
+  CLEAR: lv_xml_err, lv_off_start, lv_off_end.
+  lv_off_start = -1.
+  FIND REGEX '<[Ii]nner[Ee]rrors' IN lv_in_str MATCH OFFSET lv_off_start.
+  IF sy-subrc = 0.
+    FIND REGEX '</[Ii]nner[Ee]rrors>' IN lv_in_str MATCH OFFSET lv_off_end.
+    IF sy-subrc = 0 AND lv_off_end > lv_off_start.
+      lv_end_len = strlen( lv_end_tag ).
+      lv_len     = lv_off_end - lv_off_start + lv_end_len.
+      lv_xml_err = lv_in_str+lv_off_start(lv_len).
+    ELSE.
+      lv_xml_err = lv_in_str+lv_off_start.
+    ENDIF.
+  ELSE.
+    FIND FIRST OCCURRENCE OF '<' IN lv_in_str MATCH OFFSET lv_off_start.
+    IF sy-subrc = 0.
+      lv_xml_err = lv_in_str+lv_off_start.
+    ELSE.
+      lv_xml_err = lv_in_str.
+    ENDIF.
+  ENDIF.
+
+  " 2) Pretty print + normalizar saltos
+  PERFORM f_pretty_xml_from_text USING lv_xml_err CHANGING lv_xml_pretty.
+  IF lv_xml_pretty IS INITIAL.
+    lv_xml_pretty = lv_xml_err.
+  ENDIF.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf IN lv_xml_pretty WITH lv_nl.
+
+  " 3) Carpeta destino "como éxito" (se asegura existencia)
+  PERFORM f_get_success_like_dir CHANGING lv_dir.
+  IF lv_dir IS INITIAL.
+    MESSAGE e398(00) WITH 'No se pudo determinar/crear la carpeta destino.'.
+    RETURN.
+  ENDIF.
+
+  " 4) Base CP<NUMCOMP> sin duplicar 'CP'
+  lv_base = iv_numcomp.
+  lv_upper = lv_base. TRANSLATE lv_upper TO UPPER CASE.
+  IF strlen( lv_upper ) < 2 OR lv_upper(2) <> 'CP'.
+    CONCATENATE 'CP' lv_base INTO lv_base.
+  ENDIF.
+  CONCATENATE lv_dir '\' lv_base '_ERROR.xml' INTO lv_file.
+
+  " 5) Convertir a UTF-8 (xstring) y descargar BIN (portable)
+  DATA: lv_xdata TYPE xstring,
+        lt_bin   TYPE solix_tab,
+        lv_size  TYPE i.
+
+  DATA(lo_conv) = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
+  lo_conv->convert( EXPORTING data = lv_xml_pretty IMPORTING buffer = lv_xdata ).
+
+  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+    EXPORTING
+      buffer        = lv_xdata
+    IMPORTING
+      output_length = lv_size
+    TABLES
+      binary_tab    = lt_bin
+    EXCEPTIONS
+      OTHERS        = 1.
+
+  CALL METHOD cl_gui_frontend_services=>gui_download
+    EXPORTING
+      filename     = lv_file
+      filetype     = 'BIN'
+      bin_filesize = lv_size
+    CHANGING
+      data_tab     = lt_bin
+    EXCEPTIONS
+      OTHERS       = 1.
+
+  IF sy-subrc <> 0.
+    MESSAGE e398(00) WITH |No se pudo crear { lv_file } (SUBRC={ sy-subrc }).|.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'SAPGUI_PROGRESS_INDICATOR'
+    EXPORTING
+      text = CONV string( iv_title ).
+
+  " 6) Abrir con RC obligatorio en tu release
+  CALL METHOD cl_gui_frontend_services=>execute
+    EXPORTING
+      document  = lv_file
+      operation = 'OPEN'
+*    CHANGING
+*     rc        = lv_exec_rc
+    EXCEPTIONS
+      OTHERS    = 1.
+
+  IF lv_exec_rc IS NOT INITIAL.
+    MESSAGE w398(00) WITH |Windows devolvió RC={ lv_exec_rc } al abrir { lv_file }.|.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM f_get_sapgui_tmp_dir  ->  devuelve el directorio tmp de SAP GUI
+*---------------------------------------------------------------------*
+FORM f_get_sapgui_tmp_dir
+  CHANGING cv_dir TYPE string.
+
+  CLEAR cv_dir.
+  " 1) Carpeta de trabajo de SAP GUI (la del CP00000xxxx.pdf)
+  CALL METHOD cl_gui_frontend_services=>get_sapgui_workdir
+    CHANGING
+      sapworkdir = cv_dir
+    EXCEPTIONS
+      OTHERS     = 1.
+
+  " 2) Respaldo: temp del SO
+  IF cv_dir IS INITIAL.
+    CALL METHOD cl_gui_frontend_services=>get_temp_directory
+      CHANGING
+        temp_dir = cv_dir
+      EXCEPTIONS
+        OTHERS   = 1.
+  ENDIF.
+
+  " 3) Último fallback
+  IF cv_dir IS INITIAL.
+    cv_dir = 'C:\Users\Public\Documents'.
+  ENDIF.
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* Carpeta "como éxito"
+* - Prioriza: SAP GUI WORKDIR\tmp  >  SAP GUI WORKDIR  >  TEMP  >  SYSTEM
+* - Crea la carpeta si no existe (DIRECTORY_CREATE con RC)
+*---------------------------------------------------------------------*
+
+*---------------------------------------------------------------------*
+* Carpeta "como éxito"
+* - Prioriza: SAP GUI WORKDIR\tmp  >  SAP GUI WORKDIR  >  TEMP  >  SYSTEM
+* - Crea la carpeta si no existe (DIRECTORY_CREATE con RC)
+*---------------------------------------------------------------------*
+FORM f_get_success_like_dir CHANGING cv_dir TYPE string.
+
+  DATA: lv_ok      TYPE abap_bool,
+        lv_rc      TYPE i,
+        lv_work    TYPE string,
+        lv_tmpcand TYPE string.
+
+  CLEAR: cv_dir, lv_work, lv_tmpcand.
+
+  " 1) Workdir de SAP GUI
+  CALL METHOD cl_gui_frontend_services=>get_sapgui_workdir
+    CHANGING
+      sapworkdir = lv_work
+    EXCEPTIONS
+      OTHERS     = 1.
+
+  IF lv_work IS NOT INITIAL.
+    " Preferir subcarpeta \tmp si existe
+    CONCATENATE lv_work '\tmp' INTO lv_tmpcand.
+    CALL METHOD cl_gui_frontend_services=>directory_exist
+      EXPORTING
+        directory = lv_tmpcand
+      RECEIVING
+        result    = lv_ok
+      EXCEPTIONS
+        OTHERS    = 1.
+    IF lv_ok = abap_true.
+      cv_dir = lv_tmpcand.
+    ELSE.
+      cv_dir = lv_work.
+    ENDIF.
+  ENDIF.
+
+  " 2) Fallback: TEMP del usuario
+  IF cv_dir IS INITIAL OR sy-subrc <> 0.
+    CLEAR cv_dir.
+    CALL METHOD cl_gui_frontend_services=>get_temp_directory
+      CHANGING
+        temp_dir = cv_dir
+      EXCEPTIONS
+        OTHERS   = 1.
+  ENDIF.
+
+  " 3) Fallback extra: carpeta del sistema
+  IF cv_dir IS INITIAL OR sy-subrc <> 0.
+    CLEAR cv_dir.
+    CALL METHOD cl_gui_frontend_services=>get_system_directory
+      CHANGING
+        system_directory = cv_dir
+      EXCEPTIONS
+        OTHERS           = 1.
+  ENDIF.
+
+  " 4) Si no logramos ninguna ruta, salir
+  IF cv_dir IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " 5) Asegurar que exista (tu release exige RC en DIRECTORY_CREATE)
+  CALL METHOD cl_gui_frontend_services=>directory_exist
+    EXPORTING
+      directory = cv_dir
+    RECEIVING
+      result    = lv_ok
+    EXCEPTIONS
+      OTHERS    = 1.
+
+  IF lv_ok IS INITIAL.
+    CALL METHOD cl_gui_frontend_services=>directory_create
+      EXPORTING
+        directory = cv_dir
+      CHANGING
+        rc        = lv_rc
+      EXCEPTIONS
+        OTHERS    = 1.
+    IF sy-subrc <> 0 OR lv_rc <> 0.
+      " Si no se pudo crear, devolver vacío para que el caller avise
+      CLEAR cv_dir.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
+
+FORM f_upsert_zcp_sovos_qr
+  USING    is_cli          TYPE zsa1_cp1
+           iv_uuid         TYPE zfid_uuid_cfdi
+           iv_xml_timbrado TYPE xstring
+  CHANGING ev_ok           TYPE abap_bool
+           ev_msg          TYPE string.
+
+  DATA: ls_sovos     TYPE zcp_sovos,
+        lv_found     TYPE abap_bool,
+        lv_qr        TYPE zqr40,
+        lv_total     TYPE char18 VALUE '0.00',
+        lv_sello     TYPE string.
+
+  " RFCs: tomar como string, normalizar a CHAR13
+  DATA: lv_rfc_em_s      TYPE string,
+        lv_rfc_re_s      TYPE string,
+        lv_rfc_em_c13    TYPE char13,
+        lv_rfc_re_c13    TYPE char13,
+        lv_extranjero    TYPE char1 VALUE space.
+
+  " UUID: adaptar a dominio ZUUID (32 o 36)
+  DATA: lv_puuid         TYPE zuuid,
+        lv_puuid_len     TYPE i,
+        lv_uuid_c32      TYPE char32,
+        lv_uuid_c36      TYPE char36.
+
+  CLEAR: ev_ok, ev_msg, lv_puuid, lv_uuid_c32, lv_uuid_c36, lv_found.
+
+  "--- RFC receptor desde cliente
+  lv_rfc_re_s = is_cli-rfc_cl.
+
+  "--- RFC emisor robusto (T001Z-PAVAL, fallback T001-STCEG)
+  DATA: lv_butxt TYPE string,
+        lv_land1 TYPE land1.
+  PERFORM f_read_t001_portable
+    USING    is_cli-bukrs
+    CHANGING lv_rfc_em_s lv_butxt lv_land1.
+
+  "--- Normalizar RFCs a CHAR13 (uppercase, sin espacios)
+  lv_rfc_em_c13 = lv_rfc_em_s.
+  TRANSLATE lv_rfc_em_c13 TO UPPER CASE.
+  CONDENSE  lv_rfc_em_c13 NO-GAPS.
+  IF strlen( lv_rfc_em_c13 ) > 13. lv_rfc_em_c13 = lv_rfc_em_c13(13). ENDIF.
+
+  lv_rfc_re_c13 = lv_rfc_re_s.
+  TRANSLATE lv_rfc_re_c13 TO UPPER CASE.
+  CONDENSE  lv_rfc_re_c13 NO-GAPS.
+  IF strlen( lv_rfc_re_c13 ) > 13. lv_rfc_re_c13 = lv_rfc_re_c13(13). ENDIF.
+
+  IF lv_rfc_re_c13 = 'XEXX010101000'.
+    lv_extranjero = 'X'.
+  ENDIF.
+
+  "--- SelloCFD del XML (o del registro existente)
+  PERFORM f_extract_sello_from_xml_xstr USING iv_xml_timbrado CHANGING lv_sello.
+
+  SELECT SINGLE * INTO @ls_sovos
+    FROM zcp_sovos
+    WHERE bukrs   = @is_cli-bukrs
+      AND numcomp = @is_cli-numcomp.
+  IF sy-subrc = 0.
+    lv_found = abap_true.
+    IF lv_sello IS INITIAL AND ls_sovos-sellocfd IS NOT INITIAL.
+      lv_sello = ls_sovos-sellocfd.
+    ENDIF.
+  ENDIF.
+
+  "=== UUID → ZUUID (32 o 36) ========================================
+  DATA(lo_desc) = cl_abap_typedescr=>describe_by_data( iv_uuid ).
+  IF lo_desc->type_kind = cl_abap_typedescr=>typekind_hex
+  OR lo_desc->type_kind = cl_abap_typedescr=>typekind_xstring.
+    CALL FUNCTION 'GUID_CONVERT'
+      EXPORTING  guid_16 = iv_uuid
+      IMPORTING  guid_32 = lv_uuid_c32
+      EXCEPTIONS OTHERS  = 1.
+    IF lv_uuid_c32 IS NOT INITIAL.
+      lv_uuid_c36 = |{ lv_uuid_c32(8) }-{ lv_uuid_c32+8(4) }-{ lv_uuid_c32+12(4) }-{ lv_uuid_c32+16(4) }-{ lv_uuid_c32+20(12) }|.
+    ENDIF.
+  ELSE.
+    DATA(lv_uuid_str) = |{ iv_uuid }|.
+    TRANSLATE lv_uuid_str TO UPPER CASE.
+    REPLACE ALL OCCURRENCES OF '-' IN lv_uuid_str WITH ''.
+    CONDENSE lv_uuid_str NO-GAPS.
+    IF strlen( lv_uuid_str ) = 32.
+      lv_uuid_c32 = lv_uuid_str.
+      lv_uuid_c36 = |{ lv_uuid_c32(8) }-{ lv_uuid_c32+8(4) }-{ lv_uuid_c32+12(4) }-{ lv_uuid_c32+16(4) }-{ lv_uuid_c32+20(12) }|.
+    ELSEIF strlen( lv_uuid_str ) = 36.
+      lv_uuid_c36 = lv_uuid_str.
+      DATA(lv_c32_tmp) = lv_uuid_str.
+      REPLACE ALL OCCURRENCES OF '-' IN lv_c32_tmp WITH ''.
+      lv_uuid_c32 = lv_c32_tmp.
+    ELSE.
+      ev_msg = |UUID con longitud inesperada: "{ lv_uuid_str }"|.
+    ENDIF.
+  ENDIF.
+
+  IF lv_uuid_c36 IS INITIAL AND lv_uuid_c32 IS INITIAL.
+    ev_msg = COND string( WHEN ev_msg IS INITIAL THEN 'No fue posible convertir UUID.' ELSE ev_msg ).
+    RETURN.
+  ENDIF.
+
+  DESCRIBE FIELD lv_puuid LENGTH lv_puuid_len IN CHARACTER MODE.
+  IF lv_puuid_len = 32 AND lv_uuid_c32 IS NOT INITIAL.
+    lv_puuid = lv_uuid_c32.
+  ELSE.
+    lv_puuid = lv_uuid_c36.
+  ENDIF.
+
+  "=== Construir URL QR (TIPOS ESTRICTOS) =============================
+  CALL FUNCTION 'ZMFCFDI40_QR'
+    EXPORTING
+      puuid        = lv_puuid           " ZUUID (C32 o C36)
+      rfc_emisor   = lv_rfc_em_c13      " *** CHAR13 ***
+      rfc_receptor = lv_rfc_re_c13      " *** CHAR13 ***
+      pextranjero  = lv_extranjero      " CHAR1
+      ptotal       = lv_total           " CHAR18
+      pselloemisor = lv_sello           " STRING
+    IMPORTING
+      purl         = lv_qr
+    EXCEPTIONS
+      OTHERS       = 1.
+
+  IF lv_qr IS INITIAL.
+    ev_msg = 'No se pudo construir CODE_QR (ZMFCFDI40_QR devolvió vacío).'.
+    RETURN.
+  ENDIF.
+
+  "=== UPSERT en ZCP_SOVOS ============================================
+  IF lv_found = abap_true.
+    ls_sovos-code_qr = lv_qr.
+    IF ls_sovos-uuid     IS INITIAL. ls_sovos-uuid     = lv_puuid. ENDIF.
+    IF ls_sovos-sellocfd IS INITIAL. ls_sovos-sellocfd = lv_sello. ENDIF.
+    UPDATE zcp_sovos FROM ls_sovos.
+    IF sy-subrc = 0. ev_ok = abap_true. ELSE. ev_msg = 'UPDATE ZCP_SOVOS falló.'.
+    ENDIF.
+  ELSE.
+    CLEAR ls_sovos.
+    ls_sovos-bukrs    = is_cli-bukrs.
+    ls_sovos-numcomp  = is_cli-numcomp.
+    ls_sovos-uuid     = lv_puuid.
+    ls_sovos-code_qr  = lv_qr.
+    IF lv_sello IS NOT INITIAL.
+      ls_sovos-sellocfd = lv_sello.
+    ENDIF.
+    INSERT zcp_sovos FROM ls_sovos.
+    IF sy-subrc = 0. ev_ok = abap_true. ELSE. ev_msg = 'INSERT ZCP_SOVOS falló.'.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* Extrae SelloCFD o Sello (8 últimos los recorta la FM) desde XML
+*---------------------------------------------------------------------*
+FORM f_extract_sello_from_xml_xstr
+  USING    iv_xml_xstr TYPE xstring
+  CHANGING cv_sello    TYPE string.
+
+  DATA lv_str TYPE string.
+  CLEAR cv_sello.
+  IF iv_xml_xstr IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  PERFORM zconv_xstr_to_str USING iv_xml_xstr CHANGING lv_str.
+  IF lv_str IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " Busca SelloCFD="..." o Sello="..."
+  FIND REGEX 'SelloCFD="([^"]+)"' IN lv_str SUBMATCHES cv_sello.
+  IF cv_sello IS INITIAL.
+    FIND REGEX 'Sello="([^"]+)"' IN lv_str SUBMATCHES cv_sello.
+  ENDIF.
+
+ENDFORM.

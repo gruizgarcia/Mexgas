@@ -1,0 +1,397 @@
+  METHOD call_timbrado.
+    DATA: lv_apikey    TYPE string,
+          l_string     TYPE string,
+          l_xstring    TYPE xstring,
+          xml_document TYPE REF TO if_ixml_document,
+          xml_root     TYPE REF TO if_ixml_element,
+          xml_element  TYPE REF TO if_ixml_element,
+          name         TYPE string,
+          namespace    TYPE string,
+          ws_header    TYPE REF TO if_wsprotocol_ws_header,
+          msg_error    TYPE string.
+
+    DATA: ls_head       TYPE zet_head_40,
+          va_xml_string TYPE string.
+
+    CLEAR: e_uuid, e_url, e_xml_timb, e_err_xstr, e_err_xml, e_err_msg, e_err_code.
+
+    " Toma algún head cargado previamente con SET_DATA
+    READ TABLE mt_head INTO ls_head INDEX 1.
+    va_xml_string = i_xml.
+
+    " 1) API KEY por BUKRS
+    SELECT SINGLE apikey
+      FROM zfe_apikey_all
+      INTO @lv_apikey
+      WHERE bukrs = @ls_head-bukrs.
+    IF sy-subrc <> 0 OR lv_apikey IS INITIAL.
+      e_err_msg = 'API Key no configurada para la sociedad.'.
+      RETURN.
+    ENDIF.
+
+    "==========================
+    " PROXIES Y TIPOS
+    "==========================
+    DATA: ws_timbrarpro TYPE REF TO zpro_co_iemision,
+          ws_timbrardes TYPE REF TO ztest_co_iemision.
+
+    DATA: st_input_p  TYPE zpro_emitir_comprobante_reques,
+          ls_output   TYPE zpro_emitir_comprobante_respon,
+          st_input_t  TYPE ztest_emitir_comprobante_reque,
+          st_output_t TYPE ztest_emitir_comprobante_respo.
+
+    " QA: propiedades (si las usas)
+    DATA: it_properties_t TYPE TABLE OF ztest_transaction_property,
+          st_properties_t TYPE ztest_transaction_property.
+
+    CLEAR: st_input_p, st_input_t, ls_output, st_output_t.
+    st_input_p-comprobante = va_xml_string.
+    st_input_t-comprobante = va_xml_string.
+
+    " ================== PRODUCTIVO / QA ==================
+    IF sy-sysid = 'TPP'.
+      " -------- PRODUCTIVO --------
+      TRY.
+          CREATE OBJECT ws_timbrarpro
+            EXPORTING
+              logical_port_name = 'ZPRO_CO_IEMISION_PORT'.
+
+          ws_header ?= ws_timbrarpro->get_protocol( 'IF_WSPROTOCOL_WS_HEADER' ).
+
+          CONCATENATE
+            '<soapenv:Header>'
+            '<cus:ApiKey  xmlns:cus="http://www.reachcore.com/CFDI/customHeaders">'
+            lv_apikey
+            '</cus:ApiKey>'
+            '</soapenv:Header>'
+            INTO l_string.
+
+          l_xstring = cl_proxy_service=>cstring2xstring( l_string ).
+
+          IF l_string IS NOT INITIAL.
+            CALL FUNCTION 'SDIXML_XML_TO_DOM'
+              EXPORTING
+                xml           = l_xstring
+              IMPORTING
+                document      = xml_document
+              EXCEPTIONS
+                invalid_input = 1
+                OTHERS        = 2.
+            IF sy-subrc = 0 AND xml_document IS BOUND.
+              xml_root = xml_document->get_root_element( ).
+              xml_element ?= xml_root->get_first_child( ).
+              WHILE xml_element IS BOUND.
+                name      = xml_element->get_name( ).
+                namespace = xml_element->get_namespace_uri( ).
+                ws_header->set_request_header(
+                    name      = name
+                    namespace = namespace
+                    dom       = xml_element ).
+                xml_element ?= xml_element->get_next( ).
+              ENDWHILE.
+            ENDIF.
+          ENDIF.
+
+          ws_timbrarpro->emitir_comprobante(
+            EXPORTING  emitir_comprobante_request  = st_input_p
+            IMPORTING  emitir_comprobante_response = ls_output ).
+
+        CATCH cx_ai_system_fault INTO DATA(lx_sys_p).
+          msg_error = lx_sys_p->get_text( ).
+        CATCH cx_ai_application_fault INTO DATA(lx_app_p).
+          msg_error = lx_app_p->get_text( ).
+      ENDTRY.
+
+    ELSE.
+      " -------- QA / DESARROLLO --------
+      TRY.
+          CREATE OBJECT ws_timbrardes
+            EXPORTING
+              logical_port_name = 'ZTEST_CO_IEMISION_PORT'.
+
+          ws_header ?= ws_timbrardes->get_protocol( 'IF_WSPROTOCOL_WS_HEADER' ).
+
+          CONCATENATE
+            '<soapenv:Header>'
+            '<cus:ApiKey  xmlns:cus="http://www.reachcore.com/CFDI/customHeaders">'
+            lv_apikey
+            '</cus:ApiKey>'
+            '</soapenv:Header>'
+            INTO l_string.
+
+          l_xstring = cl_proxy_service=>cstring2xstring( l_string ).
+
+          IF l_string IS NOT INITIAL.
+            CALL FUNCTION 'SDIXML_XML_TO_DOM'
+              EXPORTING
+                xml           = l_xstring
+              IMPORTING
+                document      = xml_document
+              EXCEPTIONS
+                invalid_input = 1
+                OTHERS        = 2.
+            IF sy-subrc = 0 AND xml_document IS BOUND.
+              xml_root = xml_document->get_root_element( ).
+              xml_element ?= xml_root->get_first_child( ).
+              WHILE xml_element IS BOUND.
+                name      = xml_element->get_name( ).
+                namespace = xml_element->get_namespace_uri( ).
+                ws_header->set_request_header(
+                    name      = name
+                    namespace = namespace
+                    dom       = xml_element ).
+                xml_element ?= xml_element->get_next( ).
+              ENDWHILE.
+            ENDIF.
+          ENDIF.
+
+          " Propiedades QA (si aplica)
+          CLEAR: it_properties_t, st_properties_t.
+          st_properties_t-key   = 'TipoCFD'.
+          st_properties_t-value = 'Factura'.
+          APPEND st_properties_t TO it_properties_t.
+          st_input_t-transaction_properties-transaction_property = it_properties_t.
+
+          ws_timbrardes->emitir_comprobante(
+            EXPORTING  emitir_comprobante_request  = st_input_t
+            IMPORTING  emitir_comprobante_response = st_output_t ).
+
+          " Normaliza a la estructura productiva
+          CLEAR ls_output.
+          ls_output-error-inner_errors = st_output_t-error-inner_errors.
+          ls_output-result             = st_output_t-result.
+          MOVE st_output_t-transaction_properties-transaction_property[]
+            TO ls_output-transaction_properties-transaction_property[].
+
+        CATCH cx_ai_system_fault INTO DATA(lx_sys_t).
+          msg_error = lx_sys_t->get_text( ).
+        CATCH cx_ai_application_fault INTO DATA(lx_app_t).
+          msg_error = lx_app_t->get_text( ).
+      ENDTRY.
+    ENDIF.
+
+    " ================== ERROR DEL PROXY ==================
+    IF msg_error IS NOT INITIAL.
+      e_err_msg = msg_error.
+      RETURN.
+    ENDIF.
+
+    " ================== ERROR DEL PAC (InnerErrors) ==================
+    CLEAR: e_err_xstr, e_err_xml, e_err_msg, e_err_code.
+    IF ls_output-error-inner_errors IS NOT INITIAL.
+      e_err_xstr = ls_output-error-inner_errors.
+
+      " XSTRING -> STRING (UTF-8)
+      CALL FUNCTION 'ECATT_CONV_XSTRING_TO_STRING'
+        EXPORTING
+          im_xstring  = e_err_xstr
+          im_encoding = 'UTF-8'
+        IMPORTING
+          ex_string   = e_err_xml.
+
+      " Parseo del XML de error para extraer <Message> y <Code>
+      DATA: lt_xml TYPE TABLE OF smum_xmltb,
+            lt_ret TYPE TABLE OF bapiret2,
+            ls_xml TYPE smum_xmltb.
+
+      CALL FUNCTION 'SMUM_XML_PARSE'
+        EXPORTING
+          xml_input = e_err_xstr
+        TABLES
+          xml_table = lt_xml
+          return    = lt_ret.
+
+      LOOP AT lt_xml INTO ls_xml WHERE cname = 'Message' OR cname = 'Code'.
+        IF ls_xml-cname = 'Message'.
+          IF e_err_msg IS INITIAL.
+            e_err_msg = ls_xml-cvalue.
+          ELSE.
+            CONCATENATE e_err_msg ls_xml-cvalue INTO e_err_msg SEPARATED BY ' | '.
+          ENDIF.
+        ELSEIF ls_xml-cname = 'Code'.
+          IF e_err_code IS INITIAL.
+            e_err_code = ls_xml-cvalue.
+          ELSE.
+            CONCATENATE e_err_code ls_xml-cvalue INTO e_err_code SEPARATED BY ','.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      " Si el PAC devolvió error, no intentes mapear UUID/URL/XML
+      RETURN.
+    ENDIF.
+
+    " ================== MAPEOS DINÁMICOS (UUID/URL/XML timbrado) ==================
+    FIELD-SYMBOLS: <res>  TYPE any,
+                   <uuid> TYPE any,
+                   <url>  TYPE any,
+                   <xml>  TYPE any,
+                   <tfd>  TYPE any.
+
+    ASSIGN COMPONENT 'RESULT' OF STRUCTURE ls_output TO <res>.
+    IF sy-subrc = 0 AND <res> IS ASSIGNED.
+      ASSIGN COMPONENT 'UUID' OF STRUCTURE <res> TO <uuid>.
+      IF sy-subrc = 0 AND <uuid> IS ASSIGNED AND <uuid> IS NOT INITIAL.
+        e_uuid = <uuid>.
+      ENDIF.
+
+      ASSIGN COMPONENT 'URL_XML' OF STRUCTURE <res> TO <url>.
+      IF sy-subrc = 0 AND <url> IS ASSIGNED AND <url> IS NOT INITIAL.
+        e_url = <url>.
+      ENDIF.
+
+      ASSIGN COMPONENT 'XML' OF STRUCTURE <res> TO <xml>.
+      IF sy-subrc = 0 AND <xml> IS ASSIGNED AND <xml> IS NOT INITIAL.
+        e_xml_timb = <xml>.
+      ENDIF.
+
+      " RESULT-TFD-UUID
+      ASSIGN COMPONENT 'TFD' OF STRUCTURE <res> TO <tfd>.
+      IF sy-subrc = 0 AND <tfd> IS ASSIGNED.
+        ASSIGN COMPONENT 'UUID' OF STRUCTURE <tfd> TO <uuid>.
+        IF sy-subrc = 0 AND <uuid> IS ASSIGNED AND <uuid> IS NOT INITIAL.
+          e_uuid = <uuid>.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " ======= Recuperar UUID / PdfUrl desde TRANSACTION_PROPERTIES (ADD) =======
+    FIELD-SYMBOLS: <tp_struc>  TYPE any,
+                   <tprop_tab> TYPE STANDARD TABLE,
+                   <row>       TYPE any,
+                   <k>         TYPE any,
+                   <v>         TYPE any.
+
+    ASSIGN COMPONENT 'TRANSACTION_PROPERTIES' OF STRUCTURE ls_output TO <tp_struc>.
+    IF sy-subrc = 0 AND <tp_struc> IS ASSIGNED.
+      ASSIGN COMPONENT 'TRANSACTION_PROPERTY' OF STRUCTURE <tp_struc> TO <tprop_tab>.
+      IF sy-subrc = 0 AND <tprop_tab> IS ASSIGNED.
+        LOOP AT <tprop_tab> ASSIGNING <row>.
+          DATA(lv_key) = VALUE string( ).
+          DATA(lv_val) = VALUE string( ).
+          ASSIGN COMPONENT 'KEY'   OF STRUCTURE <row> TO <k>.
+          ASSIGN COMPONENT 'VALUE' OF STRUCTURE <row> TO <v>.
+          IF sy-subrc = 0 AND <k> IS ASSIGNED.  lv_key = <k>.  ENDIF.
+          IF sy-subrc = 0 AND <v> IS ASSIGNED.  lv_val = <v>.  ENDIF.
+
+          TRANSLATE lv_key TO UPPER CASE.
+          CONDENSE lv_key.
+          CONDENSE lv_val.
+
+          " UUID
+          IF e_uuid IS INITIAL AND ( lv_key = 'TIMBRE.UUID'
+                                     OR lv_key = 'UUID'
+                                     OR lv_key = 'TFD.UUID'
+                                     OR lv_key = 'TIMBREFISCALDIGITAL.UUID'
+                                     OR lv_key = 'CFDI.UUID' ).
+            e_uuid = lv_val.
+            " PdfUrl
+          ELSEIF e_url IS INITIAL AND ( lv_key = 'RESULT.PDFURL'
+                                        OR lv_key = 'PDFURL'
+                                        OR lv_key = 'URL_PDF'
+                                        OR lv_key = 'RESULT.URL_PDF' ).
+            e_url = lv_val.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+    " ===========================================================================
+
+    " Alternativas si el XML viene con otros nombres
+    IF e_xml_timb IS INITIAL.
+      ASSIGN COMPONENT 'XML'          OF STRUCTURE ls_output TO <xml>.
+      IF sy-subrc = 0 AND <xml> IS ASSIGNED AND <xml> IS NOT INITIAL.
+        e_xml_timb = <xml>.
+      ENDIF.
+    ENDIF.
+    IF e_xml_timb IS INITIAL.
+      ASSIGN COMPONENT 'XML_TIMBRADO' OF STRUCTURE ls_output TO <xml>.
+      IF sy-subrc = 0 AND <xml> IS ASSIGNED AND <xml> IS NOT INITIAL.
+        e_xml_timb = <xml>.
+      ENDIF.
+    ENDIF.
+    IF e_xml_timb IS INITIAL.
+      ASSIGN COMPONENT 'XML_BASE64'   OF STRUCTURE ls_output TO <xml>.
+      IF sy-subrc = 0 AND <xml> IS ASSIGNED AND <xml> IS NOT INITIAL.
+        e_xml_timb = <xml>.
+      ENDIF.
+    ENDIF.
+    IF e_xml_timb IS INITIAL.
+      ASSIGN COMPONENT 'COMPROBANTE'  OF STRUCTURE ls_output TO <xml>.
+      IF sy-subrc = 0 AND <xml> IS ASSIGNED AND <xml> IS NOT INITIAL.
+        e_xml_timb = <xml>.
+      ENDIF.
+    ENDIF.
+
+    " Si vino en Base64, decodifica
+    IF e_xml_timb IS NOT INITIAL AND e_xml_timb NS '<'.
+      DATA(lv_xml_decoded) = VALUE string( ).
+      CALL FUNCTION 'SCMS_BASE64_DECODE_STR'
+        EXPORTING
+          input  = e_xml_timb
+        IMPORTING
+          output = lv_xml_decoded
+        EXCEPTIONS
+          OTHERS = 1.
+      IF sy-subrc = 0 AND lv_xml_decoded CS '<'.
+        e_xml_timb = lv_xml_decoded.
+      ENDIF.
+    ENDIF.
+
+    IF e_uuid IS INITIAL AND e_xml_timb CS '<cfdi:Comprobante'.
+      DATA lv_uuid_rx TYPE string.
+
+      " 1) Buscar UUID en el Timbre (prefijo de namespace puede variar: tfd:, cfdi:tfd:, etc.)
+      FIND REGEX 'TimbreFiscalDigital[^>]*\sUUID="([^"]+)"'
+           IN e_xml_timb SUBMATCHES lv_uuid_rx.
+
+      " 2) Si no lo halló por el nombre del timbre, buscar cualquier atributo UUID con formato 36 chars
+      IF lv_uuid_rx IS INITIAL.
+        FIND REGEX 'UUID="([0-9A-Fa-f-]{36})"'
+             IN e_xml_timb SUBMATCHES lv_uuid_rx.
+      ENDIF.
+
+      IF lv_uuid_rx IS NOT INITIAL.
+        e_uuid = lv_uuid_rx.
+      ENDIF.
+    ENDIF.
+
+    " --- Saneado defensivo del XML timbrado (BOM UTF-8 + '#' intercalados)
+    IF e_xml_timb IS NOT INITIAL.
+      DATA lx TYPE xstring.
+
+      " STRING -> XSTRING
+      CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+        EXPORTING
+          text   = e_xml_timb
+        IMPORTING
+          buffer = lx.
+
+      " Quitar BOM UTF-8 (EF BB BF) si está al inicio
+      CONSTANTS c_bom_utf8 TYPE xstring VALUE 'EFBBBF'.
+      IF xstrlen( lx ) >= 3 AND lx(3) = c_bom_utf8.
+        lx = lx+3. " recorta los 3 bytes del BOM
+      ENDIF.
+
+      " XSTRING -> STRING (UTF-8)
+      CALL FUNCTION 'SCMS_XSTRING_TO_STRING'
+        EXPORTING
+          buffer   = lx
+          encoding = 'UTF-8'
+        IMPORTING
+          text     = e_xml_timb.
+
+      " Limpieza adicional
+      REPLACE ALL OCCURRENCES OF '#' IN e_xml_timb WITH ''.
+      CONDENSE e_xml_timb NO-GAPS.
+    ENDIF.
+
+
+
+    " Validación mínima
+    IF e_xml_timb IS INITIAL OR e_xml_timb NS '<cfdi:Comprobante'.
+      CLEAR: e_uuid, e_url, e_xml_timb.
+      e_err_msg = 'El PAC no devolvió un XML timbrado válido.'.
+      RETURN.
+    ENDIF.
+  ENDMETHOD.

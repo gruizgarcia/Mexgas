@@ -1,0 +1,290 @@
+FORM f_visualiza_pdf_en_pantalla
+  USING    lwa_zta1_2 TYPE zsa1_cp1
+           lv_fname   TYPE string.
+
+  "================= Declaraciones =================
+  DATA: lv_formname    TYPE tdsfname VALUE 'ZFISF_DOCTIMB3_VIKO',
+        lv_fm_name     TYPE rs38l_fnam,
+        lwa_ctrl       TYPE ssfctrlop,
+        lwa_comp       TYPE ssfcompop,
+        lwa_otf        TYPE ssfcrescl,      " OTFDATA (ITCOO)
+        v_bin_filesize TYPE i.
+
+  " === Emisor / Receptor / Timbre (TIPOS EXACTOS DEL SF) ============
+  DATA: lv_rfc_receptor TYPE zsa1_cp1-rfc_cl,
+        lv_nom_receptor TYPE zsa1_cp1-nombre,
+        lv_rfc_emisor   TYPE t001z-paval,
+        lv_nom_emisor   TYPE t001-butxt,
+        lv_reg_fis      TYPE char5,
+        lv_regimen      TYPE char3,
+        lv_pais         TYPE t005-intca3,
+        lv_dom          TYPE kna1-pstlz,
+        lv_lug_exp      TYPE adrc-post_code1,
+        lv_uuid         TYPE zta1_cp1-uuid_comp,
+        lv_fechat       TYPE zfid_fe_tim,
+        lv_cadena_org   TYPE string.
+
+  " Maestro empresa y dirección
+  DATA: ls_t001  TYPE t001,
+        ls_adrc  TYPE adrc,
+        lv_land1 TYPE land1.
+
+  " Tablas para el SmartForm
+  DATA: lt_pagos TYPE ztta1_cp1,
+        lt_fac   TYPE ztta1_cp1.
+
+  " Sovos / CFDI timbre
+  DATA: lt_zcp_sovos TYPE STANDARD TABLE OF zcp_sovos,
+        wa_zcp_sovos TYPE zcp_sovos,
+        wa_zcfdit002 TYPE zcfdit002.
+
+  " GUI
+  DATA: lv_suggest_name TYPE string,
+        lv_path         TYPE string,
+        lv_full_path    TYPE string.
+
+  " Auxiliares
+  DATA: lv_kunnr TYPE kunnr,
+        ls_kna1  TYPE kna1.
+
+  "================= 1) Parámetros impresión =========================
+  SELECT SINGLE low INTO lv_formname FROM tvarvc WHERE name = 'CFDI40CP_PDF'.
+  IF sy-subrc <> 0 OR lv_formname IS INITIAL.
+    lv_formname = 'ZFISF_DOCTIMB3_VIKO'.
+  ENDIF.
+
+  CLEAR: lwa_ctrl, lwa_comp.
+  lwa_ctrl-getotf     = 'X'.
+  lwa_ctrl-no_dialog  = 'X'.
+  lwa_comp-tdimmed    = 'X'.
+  lwa_comp-tddelete   = 'X'.
+
+  "================= 2) Receptor (estructura y respaldo KNA1) ========
+  lv_rfc_receptor = lwa_zta1_2-rfc_cl.
+  lv_nom_receptor = lwa_zta1_2-nombre.
+
+  IF lv_rfc_receptor IS INITIAL OR lv_nom_receptor IS INITIAL.
+    lv_kunnr = lwa_zta1_2-kunnr.
+    IF lv_kunnr IS NOT INITIAL.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lv_kunnr
+        IMPORTING
+          output = lv_kunnr.
+      SELECT SINGLE * INTO ls_kna1 FROM kna1 WHERE kunnr = lv_kunnr.
+      IF sy-subrc = 0.
+        IF lv_nom_receptor IS INITIAL AND ls_kna1-name1 IS NOT INITIAL.
+          lv_nom_receptor = ls_kna1-name1.
+        ENDIF.
+        IF lv_rfc_receptor IS INITIAL.
+          FIELD-SYMBOLS <f_stcd1> TYPE any.
+          ASSIGN COMPONENT 'STCD1' OF STRUCTURE ls_kna1 TO <f_stcd1>.
+          IF sy-subrc = 0 AND <f_stcd1> IS ASSIGNED AND <f_stcd1> IS NOT INITIAL.
+            lv_rfc_receptor = <f_stcd1>.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  "================= 3) Emisor: T001Z/T001/ADRC/T005 =================
+  SELECT SINGLE * INTO ls_t001 FROM t001 WHERE bukrs = lwa_zta1_2-bukrs.
+  IF sy-subrc = 0.
+    lv_land1      = ls_t001-land1.
+    lv_nom_emisor = ls_t001-butxt.
+
+    " RFC Emisor preferente: T001Z-PAVAL
+    SELECT SINGLE paval INTO lv_rfc_emisor FROM t001z WHERE bukrs = ls_t001-bukrs.
+
+    " Respaldo: STCEG (si existe) en T001
+    IF lv_rfc_emisor IS INITIAL.
+      SELECT SINGLE stceg INTO lv_rfc_emisor FROM t001 WHERE bukrs = ls_t001-bukrs.
+    ENDIF.
+
+    " Dirección/Lugar expedición
+    IF ls_t001-adrnr IS NOT INITIAL.
+      SELECT SINGLE * INTO ls_adrc FROM adrc WHERE addrnumber = ls_t001-adrnr.
+      IF sy-subrc = 0.
+        lv_dom     = ls_adrc-post_code1.
+        lv_lug_exp = ls_adrc-post_code1.
+        IF lv_nom_emisor IS INITIAL AND ls_adrc-name1 IS NOT INITIAL.
+          lv_nom_emisor = ls_adrc-name1.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " País ISO A3
+    IF lv_land1 IS NOT INITIAL.
+      SELECT SINGLE intca3 INTO lv_pais FROM t005 WHERE land1 = lv_land1.
+    ENDIF.
+  ENDIF.
+
+  " Defaults seguros (evita vacíos al SF)
+  IF lv_nom_emisor   IS INITIAL. lv_nom_emisor   = 'N/A'.            ENDIF.
+  IF lv_rfc_emisor   IS INITIAL. lv_rfc_emisor   = 'XAXX010101000'.  ENDIF.
+  IF lv_pais         IS INITIAL. lv_pais         = 'MEX'.            ENDIF.
+  IF lv_dom          IS INITIAL. lv_dom          = '00000'.          ENDIF.
+  IF lv_lug_exp      IS INITIAL. lv_lug_exp      = lv_dom.           ENDIF.
+  IF lv_reg_fis      IS INITIAL. lv_reg_fis      = '601'.            ENDIF.
+  IF lv_regimen      IS INITIAL. lv_regimen      = '601'.            ENDIF.
+  IF lv_nom_receptor IS INITIAL. lv_nom_receptor = 'N/A'.            ENDIF.
+  IF lv_rfc_receptor IS INITIAL. lv_rfc_receptor = 'XAXX010101000'.  ENDIF.
+
+  "================= 4) Cargar tablas y timbre =======================
+  SELECT * FROM zta1_cp1 INTO TABLE lt_pagos WHERE numcomp = lwa_zta1_2-numcomp.
+  lt_fac = lt_pagos.
+
+  " SOVOS (para QR/sellos/fecha timbrado/cadena)
+  SELECT * FROM zcp_sovos INTO TABLE lt_zcp_sovos
+   WHERE bukrs = lwa_zta1_2-bukrs AND numcomp = lwa_zta1_2-numcomp.
+  IF sy-subrc = 0.
+    READ TABLE lt_zcp_sovos INTO wa_zcp_sovos INDEX 1.
+  ENDIF.
+
+  " Mapear Sovos -> ZCFDIT002
+  CLEAR wa_zcfdit002.
+  IF wa_zcp_sovos IS NOT INITIAL.
+    wa_zcfdit002-version          = wa_zcp_sovos-version.
+    wa_zcfdit002-uuid             = wa_zcp_sovos-uuid.
+    wa_zcfdit002-fechatimbrado    = wa_zcp_sovos-fechatimbrado.
+    wa_zcfdit002-nocertificadosat = wa_zcp_sovos-nocertificadosat.
+    wa_zcfdit002-sellocfd         = wa_zcp_sovos-sellocfd.
+    wa_zcfdit002-sellosat         = wa_zcp_sovos-sellosat.
+    wa_zcfdit002-rfcemisor        = wa_zcp_sovos-rfcemisor.
+    wa_zcfdit002-rfcreceptor      = wa_zcp_sovos-rfcreceptor.
+    wa_zcfdit002-total_compr      = wa_zcp_sovos-total_compr.
+    wa_zcfdit002-code_qr          = wa_zcp_sovos-code_qr.
+  ENDIF.
+
+  " UUID / Fecha / Cadena
+  lv_uuid       = wa_zcp_sovos-uuid.
+  lv_fechat     = wa_zcp_sovos-fechatimbrado.
+  lv_cadena_org = wa_zcp_sovos-cadena_original.
+
+  IF ( lv_uuid IS INITIAL OR lv_fechat IS INITIAL ) AND lt_pagos IS NOT INITIAL.
+    DATA ls_pago TYPE zta1_cp1.
+    READ TABLE lt_pagos INTO ls_pago INDEX 1.
+    IF sy-subrc = 0.
+      IF lv_uuid   IS INITIAL AND ls_pago-uuid_comp IS NOT INITIAL.
+        lv_uuid = ls_pago-uuid_comp.
+      ENDIF.
+      IF lv_fechat IS INITIAL AND ls_pago-ztfetimb IS NOT INITIAL.
+        lv_fechat = ls_pago-ztfetimb.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  IF lv_uuid       IS INITIAL. lv_uuid       = '00000000-0000-0000-0000-000000000000'. ENDIF.
+  IF lv_cadena_org IS INITIAL. lv_cadena_org = ''. ENDIF.
+
+  "================= 5) Resolver FM del SmartForm ====================
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING
+      formname           = lv_formname
+    IMPORTING
+      fm_name            = lv_fm_name
+    EXCEPTIONS
+      no_form            = 1
+      no_function_module = 2
+      OTHERS             = 3.
+  IF sy-subrc <> 0 OR lv_fm_name IS INITIAL.
+    MESSAGE e398(00) WITH 'No se pudo resolver el SmartForm' lv_formname.
+    RETURN.
+  ENDIF.
+
+  "================= 6) Llamar SmartForm → OTF ======================
+  CALL FUNCTION lv_fm_name
+    EXPORTING
+      control_parameters = lwa_ctrl
+      output_options     = lwa_comp
+      user_settings      = ' '
+      pwa_clientes       = lwa_zta1_2
+      p_rfc_receptor     = lv_rfc_receptor
+      p_nom_receptor     = lv_nom_receptor
+      p_rfc_emisor       = lv_rfc_emisor
+      p_nom_emisor       = lv_nom_emisor
+      p_reg_fis          = lv_reg_fis
+      p_reg_fisr         = lv_regimen
+      p_dom_fis          = lv_dom
+      p_res_fis          = lv_pais
+      p_lug_exp          = lv_lug_exp
+      pwa_zcfdit002      = wa_zcfdit002
+      p_sust             = space
+      p_uuide            = lv_uuid
+      p_fechat           = lv_fechat
+      pwa_zcp_sovos      = wa_zcp_sovos          " OBLIGATORIO EN TU SF
+      p_cadena_org       = lv_cadena_org
+    IMPORTING
+      job_output_info    = lwa_otf
+    TABLES
+      pt_pagos           = lt_pagos               " ZTTA1_CP1
+      pt_fac             = lt_fac                 " ZTTA1_CP1
+      pt_fac2            = t_zta1_aux             " como en TEMP (mismo tipo del SF)
+*     pt_zcp_sovos       = lt_zcp_sovos           " descomenta si tu SF lo declara
+    EXCEPTIONS
+      formatting_error   = 1
+      internal_error     = 2
+      send_error         = 3
+      user_canceled      = 4
+      OTHERS             = 5.
+  IF sy-subrc <> 0.
+    MESSAGE e398(00) WITH 'Error al ejecutar SmartForm' lv_formname.
+    RETURN.
+  ENDIF.
+  IF lwa_otf-otfdata IS INITIAL.
+    MESSAGE e398(00) WITH 'El SmartForm no devolvió OTF (GETOTF = X)'.
+    RETURN.
+  ENDIF.
+
+  "================= 7) OTF → PDF usando CONVERT_OTF (firma antigua) =
+  " Tu sistema no tiene BIN_FILE ni CL_BCS_CONVERT público: usamos LINES (TLINE)
+  DATA: lt_pdf_lines TYPE STANDARD TABLE OF tline.
+  CLEAR: lt_pdf_lines, v_bin_filesize.
+
+  CALL FUNCTION 'CONVERT_OTF'
+    EXPORTING
+      format                = 'PDF'
+    IMPORTING
+      bin_filesize          = v_bin_filesize
+    TABLES
+      otf                   = lwa_otf-otfdata
+      lines                 = lt_pdf_lines
+    EXCEPTIONS
+      err_max_linewidth     = 1
+      err_format            = 2
+      err_conv_not_possible = 3
+      err_bad_otf           = 4
+      OTHERS                = 5.
+  IF sy-subrc <> 0 OR lt_pdf_lines IS INITIAL.
+    MESSAGE e398(00) WITH 'Fallo al convertir OTF a PDF (CONVERT_OTF/LINES)'.
+    RETURN.
+  ENDIF.
+
+  "================= 8) Guardar en carpeta TEMP y abrir ===============
+  DATA lv_full_path_tmp TYPE string.
+
+  PERFORM f_build_pdf_filename USING lwa_zta1_2 lv_fname
+                         CHANGING lv_full_path_tmp.
+
+  IF lv_full_path_tmp IS NOT INITIAL.
+    CALL METHOD cl_gui_frontend_services=>gui_download
+      EXPORTING
+        filename     = lv_full_path_tmp
+        filetype     = 'BIN'
+        bin_filesize = v_bin_filesize
+      CHANGING
+        data_tab     = lt_pdf_lines
+      EXCEPTIONS
+        OTHERS       = 1.
+
+    " Abre el PDF
+    CALL METHOD cl_gui_frontend_services=>execute
+      EXPORTING
+        document  = lv_full_path_tmp
+        operation = 'OPEN'
+      EXCEPTIONS
+        OTHERS    = 1.
+  ENDIF.
+
+
+
+ENDFORM.

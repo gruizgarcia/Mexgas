@@ -1,0 +1,693 @@
+FORM entry
+  USING
+    return_code TYPE sy-subrc
+    us_screen   TYPE c.                         "#EC CALLED "#EC NEEDED
+
+  DATA: lt_messages  TYPE ty_bapiret2_tab_x,
+        ls_message   TYPE bapiret2,
+        lv_has_error TYPE abap_bool,
+        lv_any_sw    TYPE abap_bool.
+
+  DATA: lv_belnr_s TYPE string,
+        lv_bukrs_s TYPE string,
+        lv_gjahr_s TYPE string,
+        lv_uuid_s  TYPE string.
+
+  CLEAR: lv_has_error, lv_any_sw.
+  return_code = 0.
+
+  IF nast-vstat IS INITIAL OR nast-vstat = '0'.
+
+    DATA: lv_vbeln TYPE vbrk-vbeln.
+    lv_vbeln = nast-objky.
+
+    DATA lo_cfdi TYPE REF TO zcl_cfdi40_nast.
+    DATA lx_any TYPE REF TO cx_root.  " <— para capturar error al crear el objeto
+
+    "=== Crear objeto de forma segura (no bloquear NAST si falla)
+    TRY.
+        CREATE OBJECT lo_cfdi.
+      CATCH cx_root INTO lx_any.
+        APPEND VALUE bapiret2(
+          type       = 'E'
+          id         = c_log_objt
+          number     = '099'
+          message_v1 = 'Error creando objeto CFDI'
+          message_v2 = lv_vbeln
+          message_v3 = lx_any->get_text( )
+        ) TO lt_messages.
+        lv_has_error = abap_true.
+    ENDTRY.
+
+    DATA: sociedad  LIKE vbrk-bukrs,
+          v_erdat   TYPE vbrk-erdat,
+          lv_gjahr  TYPE zcfdi4_mxdi_xml-gjahr,
+          lv_fecha  TYPE sy-datum,
+          lv_idmsg  TYPE symsgid VALUE c_log_objt,  " <--- usa constante unificada
+          lv_errorx TYPE c.
+
+    DATA: wa_head TYPE zet_head_40,
+          ls_log  TYPE zcfdi_xml_log.
+
+    DATA: lv_uuid      TYPE zuuid,
+          lv_url       TYPE zqr40,
+          lv_xml_timb  TYPE string,
+          lv_fecha_tfd TYPE string.
+
+    DATA: lv_xml_req TYPE string,
+          lv_xreq    TYPE xstring.
+
+    DATA: lx_error   TYPE REF TO cx_root.
+
+    DATA: gv_e_uuid  TYPE zuuid,
+          gv_e_error TYPE string.
+
+    DATA :
+      ls_head_cfdi LIKE LINE OF gt_head_cfdi,
+      ls_det_cfdi  TYPE zet_det_40.
+
+    DATA gv_first_sales_order TYPE vbeln_va.
+    DATA:
+      lv_docid       TYPE swo_typeid,
+      lv_ok          TYPE abap_bool,
+      lv_descripcion TYPE so_obj_des.
+    DATA: lv_ok_gos  TYPE flag,
+          lv_msg_gos TYPE string.
+    factura_swo = nast-objky.
+    tipofactura = nast-kschl.
+    DATA: ev_success TYPE  flag,
+          ev_message TYPE  string.
+    DATA(lv_vbeln10) = lv_vbeln.
+
+    " validacion de Mes Cerrado.
+    DATA ok    TYPE abap_bool.
+    Data ok_mes Type string.
+    DATA msgtx TYPE string.
+
+    IF nast-kschl = 'ZRF1'.
+      SELECT SINGLE bukrs erdat gjahr fkdat INTO (sociedad, v_erdat, lv_gjahr, lv_fecha)
+        FROM vbrk WHERE vbeln = lv_vbeln.
+
+      PERFORM validar_mes_cerrado_fi
+          USING sociedad lv_fecha 'S'
+                CHANGING msgtx ok.
+
+      IF ok = abap_true.
+
+        IF lv_gjahr IS INITIAL.
+          lv_gjahr = lv_fecha+0(4).
+        ENDIF.
+        SELECT SINGLE uuid INTO gv_e_uuid FROM zcfdi_head_40 WHERE belnr = lv_vbeln.
+        PERFORM validate_cfdi_40 USING nast-erdat gv_e_uuid lv_idmsg CHANGING gv_e_error.
+
+        IF gv_e_error IS INITIAL.
+
+
+          "=== Ejecutar flujo sólo si el objeto está disponible
+          IF lo_cfdi IS BOUND.
+
+            TRY.
+                PERFORM get_data_factura
+                        USING
+                              lv_vbeln
+                              nast-erdat
+                              lo_cfdi.
+
+
+                PERFORM llena_tabla_pricipal_fm CHANGING gv_first_sales_order.
+                READ TABLE gt_head_cfdi INTO ls_head_cfdi INDEX 1.
+                IF sy-subrc = 0.
+                  MOVE-CORRESPONDING ls_head_cfdi TO wa_head.
+                ENDIF.
+
+                CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+                  EXPORTING
+                    input  = lv_vbeln10
+                  IMPORTING
+                    output = lv_vbeln10.
+
+
+                "Normaliza la tabla head y det , para recuperar en xml.
+                lo_cfdi->ensure_det_loaded(
+                    EXPORTING
+                    iv_belnr = lv_vbeln
+                    iv_bukrs = ls_head_cfdi-bukrs
+                    iv_gjahr = ls_head_cfdi-gjahr ).
+
+
+                " 1) set_data
+                CALL METHOD lo_cfdi->set_data
+                  EXPORTING
+                    t_head_cfdi = gt_head_cfdi
+                    t_det_cfdi  = gt_det_cfdi.
+
+
+
+
+                CALL METHOD lo_cfdi->build_xml
+                  EXPORTING
+                    is_head = ls_head_cfdi
+                  RECEIVING
+                    rv_xml  = lv_xml_req.
+
+
+
+                " 2) build_xml + sanitizar + guardar RQ  (CORREGIDO)
+                CLEAR lv_xml_req.
+                CALL METHOD lo_cfdi->build_xml
+                  EXPORTING
+                    is_head = ls_head_cfdi
+                  RECEIVING
+                    rv_xml  = lv_xml_req.
+
+                CALL METHOD lo_cfdi->sanitizar_xml_final
+                  CHANGING
+                    ct_xml = lv_xml_req.
+
+                " Si quedó vacío, no continúes
+                IF lv_xml_req IS INITIAL.
+                  APPEND VALUE bapiret2(
+                    type       = 'E'
+                    id         = lv_idmsg
+                    number     = '010'
+                    message_v1 = 'XML vacío tras sanitizar'
+                    message_v2 = lv_vbeln
+                    message_v3 = lv_docid ) TO lt_messages.
+                  EXIT. "o CONTINUE según tu flujo
+                ENDIF.
+
+                " Asegurar VBELN de 10
+
+                lv_vbeln10 = lv_vbeln.
+                CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+                  EXPORTING
+                    input  = lv_vbeln10
+                  IMPORTING
+                    output = lv_vbeln10.
+
+                " XSTRING UTF-8 (si lo necesitas para objlen/BD)
+                CLEAR lv_xreq.
+                CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+                  EXPORTING
+                    text     = lv_xml_req
+                    encoding = 'UTF-8'
+                  IMPORTING
+                    buffer   = lv_xreq.
+                IF lv_xreq IS INITIAL. " fallback por si tu release ignora 'encoding'
+                  DATA(lo_out) = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
+                  lo_out->write( data = lv_xml_req ).
+                  lv_xreq = lo_out->get_buffer( ).
+                ENDIF.
+
+                lv_descripcion = |CFDI_{ lv_vbeln10 }_Request|.
+
+                CALL METHOD lo_cfdi->anexar_xml_gos
+                  EXPORTING
+                    iv_bukrs       = wa_head-bukrs
+                    iv_belnr       = lv_vbeln10
+                    iv_gjahr       = lv_gjahr
+                    iv_tipo        = 'RQ'              " <-- corregido
+                    iv_descripcion = lv_descripcion
+                    iv_xml_str     = lv_xml_req        " STRING ya sanitizado
+                  IMPORTING
+                    ev_success     = lv_ok_gos
+                    ev_message     = lv_msg_gos.
+
+                IF lv_ok_gos = abap_true OR lv_ok_gos = 'X'.
+                  APPEND VALUE bapiret2(
+                    type       = 'S'
+                    id         = lv_idmsg
+                    number     = '010'
+                    message_v1 = |CFDI_{ lv_vbeln10 }_Request.xml|
+                    message_v2 = lv_vbeln
+                    message_v3 = lv_docid ) TO lt_messages.
+                ELSE.
+                  APPEND VALUE bapiret2(
+                    type       = 'E'
+                    id         = lv_idmsg
+                    number     = '010'
+                    message_v1 = lv_msg_gos
+                    message_v2 = lv_vbeln
+                    message_v3 = lv_docid ) TO lt_messages.
+                ENDIF.
+
+
+                CLEAR ls_log.
+                ls_log-bukrs      = wa_head-bukrs.
+                ls_log-belnr      = wa_head-belnr.
+                ls_log-gjahr      = wa_head-gjahr.
+                ls_log-tipo_doc   = 'RQ'.
+                ls_log-created_on = sy-datum.
+                ls_log-created_at = sy-uzeit.
+                ls_log-xml_req    = lv_xreq.
+                MODIFY zcfdi_xml_log FROM ls_log.
+
+                " Mensaje: Request Éxito
+                CLEAR ls_message.
+                ls_message-type       = 'S'.
+                ls_message-id         = lv_idmsg.
+                ls_message-number     = '010'.
+                ls_message-message_v1 = 'XML de solicitud generado y guardado'.
+                ls_message-message_v2 = lv_vbeln.
+                APPEND ls_message TO lt_messages.
+
+                " 3) Timbrado
+                DATA: lv_err_xstr TYPE xstring,
+                      lv_err_xml  TYPE string,
+                      lv_err_msg  TYPE string,
+                      lv_err_code TYPE string.
+                CLEAR: lv_uuid, lv_url, lv_xml_timb, lv_fecha_tfd.
+
+                CALL METHOD lo_cfdi->call_timbrado
+                  EXPORTING
+                    i_xml      = lv_xml_req
+                  IMPORTING
+                    e_uuid     = lv_uuid
+                    e_url      = lv_url
+                    e_xml_timb = lv_xml_timb
+                    e_err_xstr = lv_err_xstr
+                    e_err_xml  = lv_err_xml
+                    e_err_msg  = lv_err_msg
+                    e_err_code = lv_err_code.
+
+                IF lv_xml_timb CS 'FechaTimbrado="'.
+                  FIND REGEX 'FechaTimbrado="([^"]+)"'
+                       IN lv_xml_timb SUBMATCHES lv_fecha_tfd.
+                ENDIF.
+
+                IF lv_uuid IS INITIAL.
+                  " --- Error de timbrado ---
+                  DATA lv_payload_err TYPE string.
+                  IF lv_err_xml IS NOT INITIAL.
+                    lv_payload_err = lv_err_xml.
+                  ELSE.
+                    lv_payload_err = lv_err_msg.
+                  ENDIF.
+
+                  CLEAR lv_xreq.
+                  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+                    EXPORTING
+                      text   = lv_payload_err
+                    IMPORTING
+                      buffer = lv_xreq.
+
+                  CLEAR ls_log.
+                  ls_log-bukrs      = wa_head-bukrs.
+                  ls_log-belnr      = wa_head-belnr.
+                  ls_log-gjahr      = wa_head-gjahr.
+                  ls_log-tipo_doc   = 'ER'.
+                  ls_log-created_on = sy-datum.
+                  ls_log-created_at = sy-uzeit.
+                  ls_log-xml_req    = lv_xreq.
+                  MODIFY zcfdi_xml_log FROM ls_log.
+
+                  CLEAR ls_message.
+                  ls_message-type       = 'E'.
+                  ls_message-id         = lv_idmsg.
+                  ls_message-number     = '001'.
+                  ls_message-message_v1 = 'Error de timbrado'.
+                  ls_message-message_v2 = lv_vbeln.
+                  ls_message-message_v3 = lv_err_code.
+                  ls_message-message_v4 = lv_err_msg.
+                  APPEND ls_message TO lt_messages.
+                  lv_has_error = abap_true.
+
+                  " Detalle en Performance Assistant (XML de error)
+                  IF us_screen = 'X' AND sy-batch IS INITIAL.
+                    IF lv_ok = abap_true.
+                      APPEND VALUE bapiret2(
+                        type       = 'S'
+                        id         = lv_idmsg
+                        number     = '001'             " mismo del ‘Error de timbrado’
+                        message_v1 = 'XML de error anexado al GOS'
+                        message_v2 = lv_vbeln
+                        message_v3 = lv_docid ) TO lt_messages.
+                    ENDIF.
+
+                    lv_descripcion = |CFDI_Error{ lv_vbeln10 }|.
+                    CALL METHOD lo_cfdi->anexar_xml_gos
+                      EXPORTING
+                        iv_bukrs       = wa_head-bukrs
+                        iv_belnr       = lv_vbeln
+                        iv_gjahr       = lv_gjahr
+                        iv_tipo        = 'ER'
+                        iv_descripcion = lv_descripcion
+                        iv_xml_str     = lv_err_xml
+                      IMPORTING
+                        ev_success     = lv_ok_gos
+                        ev_message     = lv_msg_gos.
+
+                    DATA lv_vbeln_s TYPE string.
+                    lv_vbeln_s = lv_vbeln.
+*                  PERFORM pa_msg_with_longtext
+*                    USING  lv_idmsg
+*                           'E'
+*                           '001'
+*                           'Error timbrado'
+*                           lv_vbeln_s
+*                           lv_err_code
+*                           ''
+*                           lv_payload_err
+*                           us_screen.
+                  ENDIF.
+
+                ELSE.
+*                wa_head-rfc_emisor
+*                wa_head-rfc_receptor
+*
+*                lv_url = |https://verificacfdi.facturaelectronica.sat.gob.mx/default.aspx?&id={ lv_uuid }| && |&re={ lv_rfc_emisor }&rr={ lv_rfc_receptor }&tt={ lv_tt }&fe={ lv_fe }|.
+*
+
+                  CALL METHOD lo_cfdi->persist_zcfdi_tables
+                    EXPORTING
+                      iv_uuid         = lv_uuid
+                      iv_url          = lv_url
+                      iv_xml_timb_str = lv_xml_timb.
+
+*               CALL METHOD lo_cfdi->upsert_table_z_from_xml
+*                 EXPORTING
+*                   iv_xml_timb = lv_xml_timb
+*                   iv_bukrs    = wa_head-bukrs
+*                   iv_belnr    = wa_head-belnr
+*                   iv_gjahr    = wa_head-gjahr
+*                 IMPORTING
+*                   ev_success  = ev_success
+*                   ev_message  = ev_message.
+                  APPEND VALUE bapiret2(
+                            type       = 'S'
+                            id         = c_log_objt
+                            number     = '000'             " “Factura timbrada”
+                            message_v1 = ev_success
+                            message_v2 = ev_message
+                            message_v3 = |Registrso BD Actualizados:{ lv_uuid }| ) TO lt_messages.
+
+                  " --- Exito Actualizo Texto de Poliza.
+                  DATA : lv_msg      TYPE string,
+                         lv_uuid_tx  TYPE zfid_uuid_cfdi,
+                         lv_belnr_tx TYPE zfid_noper.
+
+                  lv_uuid_tx  = CONV zfid_uuid_cfdi( lv_uuid ).
+                  lv_belnr_tx = lv_vbeln.
+
+                  CALL FUNCTION 'ZFI_UPDATE_TEXT'
+                    EXPORTING
+                      iv_belnr   = lv_belnr_tx
+                      iv_gjahr   = lv_gjahr
+                      iv_bukrs   = sociedad
+                      iv_uuid    = lv_uuid_tx
+                    IMPORTING
+                      ev_success = ev_success
+                      ev_message = ev_message.
+
+                  IF lv_ok = abap_true.
+                    APPEND VALUE bapiret2(
+                                     type       = 'W'
+                                     id         = c_log_objt
+                                     number     = '000'
+                                     message_v1 = ev_success
+                                     message_v2 = ev_message
+                                     message_v3 = |Actualizados Textos en Poliza:{ lv_uuid }| ) TO lt_messages.
+                  ENDIF.
+
+                  " --- Exito: persistir TI y tablas Z ---
+                  CLEAR lv_xreq.
+                  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+                    EXPORTING
+                      text   = lv_xml_timb
+                    IMPORTING
+                      buffer = lv_xreq.
+
+                  CLEAR ls_log.
+                  ls_log-bukrs      = wa_head-bukrs.
+                  ls_log-belnr      = wa_head-belnr.
+                  ls_log-gjahr      = wa_head-gjahr.
+                  ls_log-tipo_doc   = 'TI'.
+                  ls_log-created_on = sy-datum.
+                  ls_log-created_at = sy-uzeit.
+                  ls_log-xml_req    = lv_xreq.
+                  MODIFY zcfdi_xml_log FROM ls_log.
+
+                  " Mensaje: Timbrado Éxito (UUID + Fecha opcional)
+                  CLEAR ls_message.
+                  ls_message-type   = 'S'.
+                  ls_message-id     = lv_idmsg.
+                  ls_message-number = '000'.
+                  IF lv_fecha_tfd IS NOT INITIAL.
+                    CONCATENATE 'Timbrado Éxito UUID' lv_uuid lv_fecha_tfd INTO ls_message-message_v1 SEPARATED BY space.
+                  ELSE.
+                    CONCATENATE 'Timbrado Éxito UUID' lv_uuid INTO ls_message-message_v1 SEPARATED BY space.
+                  ENDIF.
+                  ls_message-message_v2 = lv_vbeln.
+                  APPEND ls_message TO lt_messages.
+
+                  " Mensaje: Factura Timbrada con el UUID
+                  CLEAR ls_message.
+                  ls_message-type       = 'S'.
+                  ls_message-id         = lv_idmsg.
+                  ls_message-number     = '000'.
+                  ls_message-message_v1 = 'Factura timbrada'.
+                  ls_message-message_v2 = lv_vbeln.
+                  ls_message-message_v3 = lv_uuid.
+                  APPEND ls_message TO lt_messages.
+
+                  " --- Recupera el PDF para despues adjuntarlo y dejarlo a la Function.
+                  PERFORM pdf_init
+                    TABLES
+                          it_factura
+                    USING
+                          us_screen
+                    CHANGING
+                          lf_retcode
+                          sociedad
+                          clasefactura
+                          orgventas.
+                  DATA: lv_descrip TYPE string,
+                        lv_archivo TYPE string.
+
+                  lv_descripcion = |CFDI_{ lv_vbeln10 }.pdf|.
+                  lv_archivo     = |CFDI_{ lv_vbeln10 }_Exito|.
+
+                  SELECT  * INTO TABLE it_factura FROM zcfdi_head_40 WHERE belnr EQ lv_vbeln.
+
+                  CALL FUNCTION 'ZAGREGA_FILE_VF02'
+                    EXPORTING
+                      factura     = factura_swo
+                      archivo     = lv_archivo
+                      descripcion = lv_descripcion
+                      servidor    = ''
+                    TABLES
+                      it_pdf      = it_pdf.
+
+                  APPEND VALUE bapiret2(
+                    type       = 'S'
+                    id         = lv_idmsg
+                    number     = '000'
+                    message_v1 = 'PDF Adjuntado GOS'
+                    message_v2 = lv_descrip
+                    message_v3 = lv_docid ) TO lt_messages.
+
+                  lv_descripcion = |CFDI_{ lv_vbeln10 }_PACTimbrado.xml|.
+                  CALL METHOD lo_cfdi->anexar_xml_gos
+                    EXPORTING
+                      iv_bukrs       = wa_head-bukrs
+                      iv_belnr       = lv_vbeln
+                      iv_gjahr       = lv_gjahr
+                      iv_tipo        = ''
+                      iv_descripcion = lv_descripcion
+                      iv_xml_str     = lv_xml_timb
+                    IMPORTING
+                      ev_success     = lv_ok_gos
+                      ev_message     = lv_msg_gos.
+
+                  lv_descripcion = |CFDI_{ lv_vbeln10 }_Timbrado.xml|.
+                  CALL METHOD lo_cfdi->anexar_xml_gos
+                    EXPORTING
+                      iv_bukrs       = wa_head-bukrs
+                      iv_belnr       = lv_vbeln
+                      iv_gjahr       = lv_gjahr
+                      iv_tipo        = 'TI'
+                      iv_descripcion = lv_descripcion
+                      iv_xml_str     = lv_xml_timb
+                    IMPORTING
+                      ev_success     = lv_ok_gos
+                      ev_message     = lv_msg_gos.
+
+                  IF lv_ok_gos = abap_true.
+                    APPEND VALUE bapiret2(
+                      type       = 'S'
+                      id         = lv_idmsg
+                      number     = '000'
+                      message_v1 = 'XML timbrados,request anexado al GOS'
+                      message_v2 = lv_vbeln
+                      message_v3 = lv_docid ) TO lt_messages.
+                  ELSE.
+                    APPEND VALUE bapiret2(
+                      type       = 'E'
+                      id         = lv_idmsg
+                      number     = '000'
+                      message_v1 = 'Error en adjuntar archivos GOS XML'
+                      message_v2 = lv_vbeln
+                      message_v3 = lv_docid ) TO lt_messages.
+                  ENDIF.
+
+                  " Longtext informativo con el XML timbrado (opcional)
+                  IF us_screen = 'X' AND sy-batch IS INITIAL.
+                    DATA: lv_uuid_e TYPE string,
+                          lv_url_e  TYPE string,
+                          lv_xml_e  TYPE string.
+                    lv_uuid_e = lv_uuid.
+                    lv_url_e  = lv_url.
+                    lv_xml_e  = lv_xml_timb.
+*                  PERFORM pa_msg_with_longtext
+*                    USING  lv_idmsg
+*                           'S'
+*                           '000'
+*                           'Timbrado Éxito'
+*                           lv_uuid_e
+*                           lv_url_e
+*                           ''
+*                           lv_xml_e
+*                           us_screen.
+                  ENDIF.
+
+                ENDIF. " lv_uuid IS INITIAL
+
+              CATCH cx_sy_move_cast_error
+                    cx_sy_conversion_error
+                    cx_sy_open_sql_db
+                    cx_sy_ref_is_initial
+                    cx_sy_dyn_call_illegal_type
+                    cx_sy_dyn_call_error
+                    cx_sy_arithmetic_error
+                    cx_sy_itab_line_not_found
+                    cx_root INTO lx_error.
+
+                APPEND VALUE bapiret2(
+                  type       = 'E'
+                  id         = lv_idmsg
+                  number     = '099'
+                  message_v1 = 'Excepción en generación/timbrado'
+                  message_v2 = lv_vbeln
+                  message_v3 = lx_error->get_text( )
+                ) TO lt_messages.
+                lv_has_error = abap_true.
+
+            ENDTRY.
+
+          ELSE.
+            " Si no hay objeto, ya se registró el error arriba; continuar sin abortar.
+          ENDIF.
+
+        ELSE.
+          " Ya timbrado según validación
+          CLEAR ls_message.
+          ls_message-type       = 'W'.
+          ls_message-id         = lv_idmsg.
+          ls_message-number     = '002'.
+          ls_message-message_v1 = 'CFDI ya timbrado; se omite timbrado'.
+          ls_message-message_v2 = lv_vbeln.
+          ls_message-message_v3 = gv_e_uuid.
+          APPEND ls_message TO lt_messages.
+        ENDIF.
+      ELSE.
+        APPEND VALUE bapiret2(
+                 type       = 'E'
+                 id         = lv_idmsg
+                 number     = '001'             " mismo del ‘Error de timbrado’
+                 message_v1 = msgtx
+                 message_v2 = lv_vbeln
+                  ) TO lt_messages.
+      ENDIF.
+
+    ENDIF. " ZRF1
+
+  ENDIF. " vstat
+
+  " ---- Asegurar que SIEMPRE quede algo en el protocolo NAST (VN052) ----
+  PERFORM ensure_nast_protocol
+    USING    c_log_objt
+    CHANGING lt_messages.
+
+  " Protocolo NAST + popups
+  LOOP AT lt_messages INTO ls_message.
+
+    CALL FUNCTION 'NAST_PROTOCOL_UPDATE'
+      EXPORTING
+        msg_arbgb = ls_message-id
+        msg_nr    = ls_message-number
+        msg_ty    = ls_message-type
+        msg_v1    = ls_message-message_v1
+        msg_v2    = ls_message-message_v2
+        msg_v3    = ls_message-message_v3
+        msg_v4    = ls_message-message_v4
+      EXCEPTIONS
+        OTHERS    = 1.
+
+    IF ls_message-type = 'E'.
+      lv_has_error = abap_true.
+    ELSE.
+      lv_any_sw = abap_true.
+    ENDIF.
+
+**    IF us_screen = 'X' AND sy-batch IS INITIAL.
+**      DATA: lv_text TYPE string,
+**            l1      TYPE c LENGTH 70,
+**            l2      TYPE c LENGTH 70,
+**            l3      TYPE c LENGTH 70,
+**            l4      TYPE c LENGTH 70.
+**
+**      CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+**        EXPORTING
+**          msgid               = ls_message-id
+**          msgnr               = ls_message-number
+**          msgv1               = ls_message-message_v1
+**          msgv2               = ls_message-message_v2
+**          msgv3               = ls_message-message_v3
+**          msgv4               = ls_message-message_v4
+**        IMPORTING
+**          message_text_output = lv_text
+**        EXCEPTIONS
+**          OTHERS              = 1.
+**
+**      IF lv_text IS INITIAL.
+**        CONCATENATE ls_message-message_v1 ls_message-message_v2
+**                    ls_message-message_v3 ls_message-message_v4
+**               INTO lv_text SEPARATED BY space.
+**      ENDIF.
+**
+**      l1 = lv_text.
+**      IF strlen( lv_text ) > 70. SHIFT lv_text LEFT BY 70 PLACES. l2 = lv_text. ENDIF.
+**      IF strlen( lv_text ) > 70. SHIFT lv_text LEFT BY 70 PLACES. l3 = lv_text. ENDIF.
+**      IF strlen( lv_text ) > 70. SHIFT lv_text LEFT BY 70 PLACES. l4 = lv_text. ENDIF.
+**
+**      CALL FUNCTION 'POPUP_TO_INFORM'
+**        EXPORTING
+**          titel  = 'Resultado CFDI'
+**          txt1   = l1
+**          txt2   = l2
+**          txt3   = l3
+**          txt4   = l4
+**        EXCEPTIONS
+**          OTHERS = 1.
+**    ENDIF.
+
+  ENDLOOP.
+
+  " ---- Grabar también BAL (Application Log) como respaldo ----
+  DATA: lt_messages_h LIKE bapiret2 OCCURS 0 WITH HEADER LINE,
+        lv_extnumber  TYPE bal_s_log-extnumber.
+  lv_extnumber = nast-objky.
+  lt_messages_h[] = lt_messages[].
+  PERFORM write_process_log
+    TABLES lt_messages_h
+    USING  lv_extnumber.
+
+  IF lv_has_error = abap_true.
+    return_code = 1.
+    us_screen = 'X'.
+  ELSE.
+    return_code = 0.
+    us_screen = 'X'.
+  ENDIF.
+
+ENDFORM.

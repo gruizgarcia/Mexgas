@@ -1,0 +1,361 @@
+REPORT zcfdi40_monitor_list.
+
+TYPE-POOLS: slis.
+TABLES: kna1,vbrk.
+
+*---------------------------------------------------------------------*
+* Pantalla de selección
+*---------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-t01.
+SELECT-OPTIONS s_vbeln FOR vbrk-vbeln NO INTERVALS.
+SELECT-OPTIONS s_bukrs FOR vbrk-bukrs.
+SELECT-OPTIONS s_fech  FOR sy-datum.
+PARAMETERS: p_all  RADIOBUTTON GROUP g1 DEFAULT 'X',
+            p_tim  RADIOBUTTON GROUP g1,
+            p_not  RADIOBUTTON GROUP g1.
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-t02.
+PARAMETERS p_spool AS CHECKBOX DEFAULT ' '.
+SELECTION-SCREEN END OF BLOCK b2.
+
+*TEXT-t01 = 'Filtros'.
+*TEXT-t02 = 'Salida / Spool'.
+
+*---------------------------------------------------------------------*
+* Tipos y datos
+*---------------------------------------------------------------------*
+TYPES: BEGIN OF ty_out,
+         factura      TYPE vbrk-vbeln,
+         bukrs        TYPE vbrk-bukrs,
+         gjahr        TYPE vbrk-gjahr,
+         fecha        TYPE sy-datum,        " <- ZCFDI_HEAD_40-fechafact (ajusta si difiere)
+         kunnr        TYPE kunnr,
+         nombre       TYPE kna1-name1,
+         total        TYPE decfloat34,      " <- ajusta si tu Z usa otro tipo
+         moneda       TYPE waers,
+         last_tdoc    TYPE char6,           " RQ/OK/ER/...
+         last_on      TYPE sy-datum,
+         last_at      TYPE sy-uzeit,
+         estado       TYPE char12,
+       END OF ty_out.
+
+" Tipo para el último log (solo 3 campos para que compile siempre)
+TYPES: BEGIN OF ty_lastlog,
+         tipo_doc   TYPE zcfdi_xml_log-tipo_doc,
+         created_on TYPE zcfdi_xml_log-created_on,
+         created_at TYPE zcfdi_xml_log-created_at,
+       END OF ty_lastlog.
+
+" Tipo para mostrar historial del log (misma estructura que arriba)
+TYPES: ty_log TYPE ty_lastlog.
+
+DATA: gt_out     TYPE STANDARD TABLE OF ty_out WITH DEFAULT KEY,
+      gs_out     TYPE ty_out,
+      gt_fcat    TYPE slis_t_fieldcat_alv,
+      gs_layout  TYPE slis_layout_alv.
+
+*---------------------------------------------------------------------*
+* START-OF-SELECTION
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+  PERFORM get_data.
+
+  IF gt_out IS INITIAL.
+    MESSAGE 'Sin datos para los filtros dados.' TYPE 'S'.
+    EXIT.
+  ENDIF.
+
+  " Filtros por estado (opcional)
+  IF p_tim = 'X'.
+    DELETE gt_out WHERE estado <> 'Timbrada'.
+  ELSEIF p_not = 'X'.
+    DELETE gt_out WHERE estado = 'Timbrada'.
+  ENDIF.
+
+  PERFORM display_alv.
+
+*---------------------------------------------------------------------*
+* FORM get_data : Lee cabeceras Z y cruza último log
+*---------------------------------------------------------------------*
+FORM get_data.
+
+  DATA: lt_head TYPE STANDARD TABLE OF zcfdi_head_40 WITH DEFAULT KEY,
+        ls_head TYPE zcfdi_head_40.
+
+  " Trae cabeceras (ajusta nombres de campos si difieren en tu Z)
+  SELECT *
+    INTO TABLE lt_head
+    FROM zcfdi_head_40
+    WHERE factura   IN s_vbeln
+      AND bukrs     IN s_bukrs
+      AND fechafact IN s_fech.
+
+  IF lt_head IS INITIAL.
+    EXIT.
+  ENDIF.
+
+  LOOP AT lt_head INTO ls_head.
+
+    CLEAR gs_out.
+    gs_out-factura = ls_head-factura.
+    gs_out-bukrs   = ls_head-bukrs.
+    gs_out-gjahr   = ls_head-gjahr.
+    gs_out-fecha   = ls_head-fechafact.   " <- ajusta si tu campo se llama distinto
+    gs_out-kunnr   = ls_head-kunnr.
+    gs_out-total   = ls_head-total.
+    gs_out-moneda  = ls_head-waers.
+
+    " Nombre del cliente
+    SELECT SINGLE name1
+      INTO gs_out-nombre
+      FROM kna1
+      WHERE kunnr = gs_out-kunnr.
+
+    " Último log por fecha/hora (ORDER BY + UP TO 1)
+    DATA: lt_lastlog TYPE STANDARD TABLE OF ty_lastlog WITH DEFAULT KEY,
+          ls_log     TYPE ty_lastlog.
+
+    REFRESH lt_lastlog.
+    SELECT tipo_doc created_on created_at
+      INTO TABLE lt_lastlog
+      FROM zcfdi_xml_log
+      WHERE belnr = gs_out-factura
+        AND bukrs = gs_out-bukrs
+        AND gjahr = gs_out-gjahr
+      ORDER BY created_on DESCENDING created_at DESCENDING
+      UP TO 1 ROWS.
+
+    IF sy-subrc = 0 AND lt_lastlog IS NOT INITIAL.
+      READ TABLE lt_lastlog INDEX 1 INTO ls_log.
+      IF sy-subrc = 0.
+        gs_out-last_tdoc = ls_log-tipo_doc.
+        gs_out-last_on   = ls_log-created_on.
+        gs_out-last_at   = ls_log-created_at.
+        CASE ls_log-tipo_doc.
+          WHEN 'OK' OR 'CFDI' OR 'TMB'.
+            gs_out-estado = 'Timbrada'.
+          WHEN 'ER'.
+            gs_out-estado = 'Error'.
+          WHEN OTHERS.
+            gs_out-estado = 'En proceso'.
+        ENDCASE.
+      ENDIF.
+    ELSE.
+      gs_out-estado = 'No timbrada'.
+    ENDIF.
+
+    APPEND gs_out TO gt_out.
+
+  ENDLOOP.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM build_fieldcat : Catálogo de campos para ALV LIST
+*---------------------------------------------------------------------*
+FORM build_fieldcat.
+
+  DATA ls_fcat TYPE slis_fieldcat_alv.
+
+  REFRESH gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'FACTURA'.
+  ls_fcat-seltext_l  = 'Factura'.
+  ls_fcat-outputlen  = 12.
+  ls_fcat-hotspot    = 'X'.        " doble click para ver log
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'FECHA'.
+  ls_fcat-seltext_l  = 'Fecha'.
+  ls_fcat-outputlen  = 10.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'KUNNR'.
+  ls_fcat-seltext_l  = 'Cliente'.
+  ls_fcat-outputlen  = 10.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'NOMBRE'.
+  ls_fcat-seltext_l  = 'Nombre cliente'.
+  ls_fcat-outputlen  = 35.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'TOTAL'.
+  ls_fcat-seltext_l  = 'Total'.
+  ls_fcat-outputlen  = 17.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'MONEDA'.
+  ls_fcat-seltext_l  = 'Moneda'.
+  ls_fcat-outputlen  = 5.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'ESTADO'.
+  ls_fcat-seltext_l  = 'Estado'.
+  ls_fcat-outputlen  = 12.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'LAST_TDOC'.
+  ls_fcat-seltext_l  = 'Últ.Log'.
+  ls_fcat-outputlen  = 6.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'LAST_ON'.
+  ls_fcat-seltext_l  = 'Fecha Log'.
+  ls_fcat-outputlen  = 10.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR ls_fcat.
+  ls_fcat-fieldname  = 'LAST_AT'.
+  ls_fcat-seltext_l  = 'Hora Log'.
+  ls_fcat-outputlen  = 8.
+  APPEND ls_fcat TO gt_fcat.
+
+  CLEAR gs_layout.
+  gs_layout-colwidth_optimize = 'X'.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM display_alv : Mostrar LIST + Spool opcional en foreground
+*---------------------------------------------------------------------*
+FORM display_alv.
+
+  PERFORM build_fieldcat.
+
+  DATA: ls_pri_params TYPE pri_params,
+        lv_valid      TYPE c.
+
+  " En background se genera spool automáticamente.
+  " En foreground, si marcas p_spool, forzamos spool:
+  IF p_spool = 'X' AND sy-batch IS INITIAL.
+    CALL FUNCTION 'GET_PRINT_PARAMETERS'
+      EXPORTING
+        no_dialog = 'X'
+      IMPORTING
+        out_parameters = ls_pri_params
+        valid          = lv_valid.
+    IF lv_valid = 'X'.
+      NEW-PAGE PRINT ON PARAMETERS ls_pri_params NO DIALOG.
+    ENDIF.
+  ENDIF.
+
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program       = sy-repid
+      i_callback_pf_status_set = 'PF_STATUS_SET'
+      i_callback_user_command  = 'USER_COMMAND'
+      is_layout                = gs_layout
+      it_fieldcat              = gt_fcat
+      i_save                   = 'A'
+    TABLES
+      t_outtab                 = gt_out
+    EXCEPTIONS
+      program_error            = 1
+      OTHERS                   = 2.
+
+  IF p_spool = 'X' AND sy-batch IS INITIAL.
+    NEW-PAGE PRINT OFF.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM pf_status_set : Barra estándar
+*---------------------------------------------------------------------*
+FORM pf_status_set USING pt_extab TYPE slis_t_extab.
+  SET PF-STATUS 'STANDARD' EXCLUDING pt_extab.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM user_command : Doble click en FACTURA muestra el LOG
+*---------------------------------------------------------------------*
+FORM user_command USING p_ucomm TYPE sy-ucomm
+                        rs_self TYPE slis_selfield.
+
+  IF p_ucomm = '&IC1'.
+    IF rs_self-fieldname = 'FACTURA'.
+      READ TABLE gt_out INDEX rs_self-tabindex INTO gs_out.
+      IF sy-subrc = 0.
+        PERFORM show_log USING gs_out-factura gs_out-bukrs gs_out-gjahr.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM show_log : Sub-lista con historial del LOG
+*---------------------------------------------------------------------*
+FORM show_log USING pv_vbeln TYPE vbrk-vbeln
+                     pv_bukrs TYPE vbrk-bukrs
+                     pv_gjahr TYPE vbrk-gjahr.
+
+  DATA: lt_log    TYPE STANDARD TABLE OF ty_log WITH DEFAULT KEY,
+        lt_fcat2  TYPE slis_t_fieldcat_alv,
+        ls_fcat2  TYPE slis_fieldcat_alv,
+        ls_layout TYPE slis_layout_alv.
+
+  SELECT tipo_doc created_on created_at
+    INTO TABLE lt_log
+    FROM zcfdi_xml_log
+    WHERE belnr = pv_vbeln
+      AND bukrs = pv_bukrs
+      AND gjahr = pv_gjahr
+    ORDER BY created_on DESCENDING created_at DESCENDING.
+
+  IF lt_log IS INITIAL.
+    MESSAGE 'Sin LOG para la factura seleccionada.' TYPE 'S'.
+    EXIT.
+  ENDIF.
+
+  REFRESH lt_fcat2.
+
+  CLEAR ls_fcat2.
+  ls_fcat2-fieldname = 'TIPO_DOC'.
+  ls_fcat2-seltext_l = 'Tipo'.
+  ls_fcat2-outputlen = 6.
+  APPEND ls_fcat2 TO lt_fcat2.
+
+  CLEAR ls_fcat2.
+  ls_fcat2-fieldname = 'CREATED_ON'.
+  ls_fcat2-seltext_l = 'Fecha'.
+  ls_fcat2-outputlen = 10.
+  APPEND ls_fcat2 TO lt_fcat2.
+
+  CLEAR ls_fcat2.
+  ls_fcat2-fieldname = 'CREATED_AT'.
+  ls_fcat2-seltext_l = 'Hora'.
+  ls_fcat2-outputlen = 8.
+  APPEND ls_fcat2 TO lt_fcat2.
+
+  CLEAR ls_layout.
+  ls_layout-colwidth_optimize = 'X'.
+
+  NEW-PAGE.
+  WRITE: / 'Log de la factura', pv_vbeln, 'Sociedad', pv_bukrs, 'Ejercicio', pv_gjahr.
+
+  CALL FUNCTION 'REUSE_ALV_LIST_DISPLAY'
+    EXPORTING
+      i_callback_program = sy-repid
+      is_layout          = ls_layout
+      it_fieldcat        = lt_fcat2
+      i_save             = 'A'
+    TABLES
+      t_outtab           = lt_log
+    EXCEPTIONS
+      program_error      = 1
+      OTHERS             = 2.
+
+ENDFORM.

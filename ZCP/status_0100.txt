@@ -1,0 +1,50 @@
+*----------------------------------------------------------------------*
+* PBO: Dynpro 0100
+*----------------------------------------------------------------------*
+MODULE status_0100 OUTPUT.
+
+  " Si vienes de Back/Cancel, no repintes ni toques la pantalla
+  IF gv_cancel = abap_true.
+    RETURN.
+  ENDIF.
+
+  " Inicializa el combo sólo la primera vez que entra a 0100
+  IF gv_pbo_init_0100 IS INITIAL.
+    DATA: lt_valores TYPE vrm_values.
+
+    lt_valores = VALUE vrm_values(
+      ( key = '01' text = '01-Comprobante emitido con errores con relación' )
+      ( key = '02' text = '02-Comprobante emitido con errores sin relación' )
+      ( key = '03' text = '03-No se llevó a cabo la operación' )
+      ( key = '04' text = '04-Operación nominativa relacionada en una factura global' )
+    ).
+
+    CALL FUNCTION 'VRM_SET_VALUES'
+      EXPORTING
+        id     = 'GV_CATEGORIA'
+        values = lt_valores.
+
+    gv_pbo_init_0100 = abap_true.
+  ENDIF.
+
+  SET PF-STATUS 'POPUP'.
+  SET TITLEBAR 'TITULO_POPUP'.
+
+  " Habilitar/deshabilitar campos del grupo 'CAT' según bandera
+  LOOP AT SCREEN.
+    IF screen-group1 = 'CAT'.
+      IF gv_habilitar_campos = abap_true.
+        screen-input  = 1.
+        screen-active = 1.
+      ELSE.
+        screen-input  = 0.
+        screen-active = 1.
+      ENDIF.
+      MODIFY SCREEN.
+    ENDIF.
+  ENDLOOP.
+
+  " Si la habilitación era sólo para este PBO, limpia la bandera
+  CLEAR gv_habilitar_campos.
+
+ENDMODULE.

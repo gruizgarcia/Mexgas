@@ -1,0 +1,61 @@
+*----------------------------------------------------------------------*
+* PAI: Dynpro 0100
+*----------------------------------------------------------------------*
+MODULE user_command_0100 INPUT.
+
+  DATA: lv_cat_local TYPE string,
+        lv_com_local TYPE string.
+
+  CONSTANTS:
+    c_ok     TYPE sy-ucomm VALUE 'OK',
+    c_enter  TYPE sy-ucomm VALUE 'ENTER',
+    c_cancel TYPE sy-ucomm VALUE 'CANCEL', "botón cancelar
+    c_back   TYPE sy-ucomm VALUE 'BACK',   "F3
+    c_esc    TYPE sy-ucomm VALUE 'CANC'.   "Esc
+
+  CASE sy-ucomm.
+
+    WHEN c_back OR c_cancel OR c_esc.
+      " Salir sin procesar: volver al menú SAP
+      CLEAR: gv_categoria, gv_comentario.
+      gv_cancel = abap_true.
+      LEAVE PROGRAM.
+
+    WHEN c_ok OR c_enter.
+      " Toma los valores ingresados
+      lv_cat_local = gv_categoria.
+      lv_com_local = gv_comentario.
+
+      " 1) Categoría obligatoria
+      IF lv_cat_local IS INITIAL.
+        gv_habilitar_campos = abap_true.         " habilita edición
+        MESSAGE 'Debe seleccionar una categoría de cancelación' TYPE 'E'.
+      ENDIF.
+
+      " 2) Comentario/UUID requerido según categoría
+      IF lv_com_local IS INITIAL.
+        CASE lv_cat_local.
+          WHEN '01'.
+            gv_habilitar_campos = abap_true.     " para 01, exigir dato
+        ENDCASE.
+
+        IF gv_habilitar_campos = abap_true.
+          MESSAGE 'Debe ingresar el numero de UUID' TYPE 'E'.
+        ELSE.
+          " Salida válida sin reenganchar selección
+          gv_cancel = abap_false.
+          LEAVE SCREEN.                           " volver al caller del CALL SCREEN
+        ENDIF.
+
+      ELSE.
+        " Datos OK -> continuar flujo normal tras CALL SCREEN
+        gv_cancel = abap_false.
+        LEAVE SCREEN.
+      ENDIF.
+
+    WHEN OTHERS.
+      " No hacer nada para otros OKCODEs
+      " (p.ej. funciones de toolbar que no deben disparar lógica)
+  ENDCASE.
+
+ENDMODULE.

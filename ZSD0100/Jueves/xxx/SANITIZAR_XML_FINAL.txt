@@ -1,0 +1,13 @@
+  METHOD sanitizar_xml_final.
+
+    " Elimina cierres duplicados como >> que pueden invalidar el XML
+    REPLACE ALL OCCURRENCES OF '>>' IN ct_xml WITH '>'.
+
+    " Elimina espacios innecesarios antes de cierre de etiquetas
+    REPLACE ALL OCCURRENCES OF ' >' IN ct_xml WITH '>'.
+
+    " Opcional: eliminar saltos de línea dobles si el PAC lo requiere
+    REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>newline && cl_abap_char_utilities=>newline
+      IN ct_xml WITH cl_abap_char_utilities=>newline.
+
+  ENDMETHOD.

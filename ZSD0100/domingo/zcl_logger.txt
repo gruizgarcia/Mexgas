@@ -1,0 +1,805 @@
+CLASS zcl_logger DEFINITION
+  PUBLIC
+  FINAL
+  CREATE PUBLIC .
+
+  PUBLIC SECTION.
+TYPES: BEGIN OF ty_log_entry,
+         timestamp TYPE timestampl,  " Marca de tiempo del mensaje
+         type TYPE char1,     " Tipo de mensaje: 'E', 'I', 'S', etc.
+         text TYPE string,    " Texto del mensaje
+       END OF ty_log_entry.
+
+TYPES: ty_log_table TYPE STANDARD TABLE OF ty_log_entry WITH EMPTY KEY.
+TYPES: ty_logger_text TYPE STANDARD TABLE OF string WITH EMPTY KEY.
+    DATA gv_errors_real TYPE i READ-ONLY .
+    DATA gv_errors TYPE i READ-ONLY .
+    DATA gv_empty TYPE abap_bool READ-ONLY VALUE 'X' ##NO_TEXT.
+
+METHODS get_all_texts
+  RETURNING VALUE(rt_texts) TYPE ty_logger_text.
+
+
+METHODS has_entries
+  RETURNING VALUE(rv_has_entries) TYPE abap_bool.
+METHODS get_summary
+  RETURNING VALUE(rv_text) TYPE string.
+
+    METHODS flush_to_nast_protocol
+      IMPORTING
+        is_nast  TYPE nast
+      CHANGING
+        cv_subrc TYPE sy-subrc.
+    METHODS add_error
+      IMPORTING iv_message TYPE string.
+    METHODS add_sy_message .
+    METHODS constructor
+      IMPORTING
+        VALUE(iv_extnumber) TYPE clike OPTIONAL
+        VALUE(iv_object)    TYPE balobj_d
+        VALUE(iv_subobject) TYPE balsubobj
+        VALUE(iv_repid)     TYPE sy-repid .
+    METHODS add_text
+      IMPORTING
+        !iv_type TYPE symsgty
+        !iv_text TYPE clike .
+    METHODS add_message
+      IMPORTING
+        !iv_msgty TYPE symsgty
+        !iv_msgid TYPE symsgid
+        !iv_msgno TYPE symsgno
+        !iv_msgv1 TYPE any OPTIONAL
+        !iv_msgv2 TYPE any OPTIONAL
+        !iv_msgv3 TYPE any OPTIONAL
+        !iv_msgv4 TYPE any OPTIONAL .
+    METHODS set_extnumber
+      IMPORTING
+        VALUE(pv_extnumber) TYPE clike .
+    METHODS refresh .
+    METHODS save .
+    METHODS save_only .
+    METHODS flush_to_slg1.
+    METHODS add_exception_message
+      IMPORTING
+        !iv_type      TYPE symsgty
+        !io_exception TYPE REF TO cx_root .
+    METHODS add_exception
+      IMPORTING
+        !iv_type      TYPE symsgty
+        !io_exception TYPE REF TO cx_root .
+    METHODS display .
+    METHODS add_bapiret2
+      IMPORTING
+        !it_bapiret2 TYPE bapiret2_tab .
+    METHODS get_as_bapiret1
+      RETURNING
+        VALUE(rt_messages) TYPE bapiret1_tab .
+    METHODS get_as_bapiret2
+      RETURNING
+        VALUE(rt_messages) TYPE bapiret2_tab .
+    METHODS add_bapiret1
+      IMPORTING
+        !it_bapiret1 TYPE bapiret1_tab .
+    METHODS reset_error_count .
+  PROTECTED SECTION.
+private section.
+
+  data GS_LOG_HEADER type BAL_S_LOG .
+  data GS_LOG_HANDLER type BALLOGHNDL .
+  data GT_LOG_HANDLER type BAL_T_LOGH .
+
+  DATA: mt_entries TYPE ty_log_table.
+  DATA: mt_log TYPE ty_log_table.
+ENDCLASS.
+
+
+
+CLASS ZCL_LOGGER IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_BAPIRET1
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IT_BAPIRET1                    TYPE        BAPIRET1_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_bapiret1.
+    FIELD-SYMBOLS: <ls_bapiret1> TYPE bapiret1.
+
+    LOOP AT it_bapiret1 ASSIGNING <ls_bapiret1>.
+
+      me->add_message(
+        EXPORTING
+          iv_msgty = <ls_bapiret1>-type
+          iv_msgid = <ls_bapiret1>-id
+          iv_msgno = <ls_bapiret1>-number
+          iv_msgv1 = <ls_bapiret1>-message_v1
+          iv_msgv2 = <ls_bapiret1>-message_v2
+          iv_msgv3 = <ls_bapiret1>-message_v3
+          iv_msgv4 = <ls_bapiret1>-message_v4 ).
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_BAPIRET2
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IT_BAPIRET2                    TYPE        BAPIRET2_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_bapiret2.
+    FIELD-SYMBOLS: <ls_bapiret2> TYPE bapiret2.
+
+    LOOP AT it_bapiret2 ASSIGNING <ls_bapiret2>.
+
+      me->add_message(
+        EXPORTING
+          iv_msgty = <ls_bapiret2>-type
+          iv_msgid = <ls_bapiret2>-id
+          iv_msgno = <ls_bapiret2>-number
+          iv_msgv1 = <ls_bapiret2>-message_v1
+          iv_msgv2 = <ls_bapiret2>-message_v2
+          iv_msgv3 = <ls_bapiret2>-message_v3
+          iv_msgv4 = <ls_bapiret2>-message_v4 ).
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_ERROR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_MESSAGE                     TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_error.
+    " Prefijo estándar para errores
+    me->add_text(
+      EXPORTING
+        iv_type =  'E'
+        iv_text =  |[ERROR] { iv_message }|
+    ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_EXCEPTION
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TYPE                        TYPE        SYMSGTY
+* | [--->] IO_EXCEPTION                   TYPE REF TO CX_ROOT
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_exception.
+    DATA: ls_exception TYPE bal_s_exc.
+
+    CLEAR ls_exception.
+
+    IF iv_type EQ 'E'.
+      ADD 1 TO me->gv_errors.
+      ADD 1 TO me->gv_errors_real.
+    ENDIF.
+
+    ls_exception-msgty     = iv_type.
+    ls_exception-exception = io_exception.
+
+    CALL FUNCTION 'BAL_LOG_EXCEPTION_ADD'
+      EXPORTING
+        i_log_handle     = gs_log_handler
+        i_s_exc          = ls_exception
+*   IMPORTING
+*       E_S_MSG_HANDLE   =
+*       E_MSG_WAS_LOGGED =
+*       E_MSG_WAS_DISPLAYED       =
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    CLEAR me->gv_empty.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_EXCEPTION_MESSAGE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TYPE                        TYPE        SYMSGTY
+* | [--->] IO_EXCEPTION                   TYPE REF TO CX_ROOT
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_exception_message.
+    DATA: lv_text TYPE string.
+
+    lv_text = io_exception->get_text( ).
+
+    me->add_text(
+    EXPORTING
+      iv_type = iv_type
+      iv_text = lv_text ).
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_MESSAGE
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_MSGTY                       TYPE        SYMSGTY
+* | [--->] IV_MSGID                       TYPE        SYMSGID
+* | [--->] IV_MSGNO                       TYPE        SYMSGNO
+* | [--->] IV_MSGV1                       TYPE        ANY(optional)
+* | [--->] IV_MSGV2                       TYPE        ANY(optional)
+* | [--->] IV_MSGV3                       TYPE        ANY(optional)
+* | [--->] IV_MSGV4                       TYPE        ANY(optional)
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_message.
+    DATA: ls_message TYPE bal_s_msg, " Mensaje
+          lv_msgv1   TYPE symsgv,
+          lv_msgv2   TYPE symsgv,
+          lv_msgv3   TYPE symsgv,
+          lv_msgv4   TYPE symsgv.
+
+    CLEAR ls_message.
+
+    IF iv_msgty EQ 'E'.
+      ADD 1 TO me->gv_errors.
+      ADD 1 TO me->gv_errors_real.
+    ENDIF.
+
+    MOVE iv_msgv1 TO lv_msgv1.
+    MOVE iv_msgv2 TO lv_msgv2.
+    MOVE iv_msgv3 TO lv_msgv3.
+    MOVE iv_msgv4 TO lv_msgv4.
+
+    CONDENSE: lv_msgv1,
+              lv_msgv2,
+              lv_msgv3,
+              lv_msgv4.
+
+    ls_message-msgty = iv_msgty.
+    ls_message-msgid = iv_msgid.
+    ls_message-msgno = iv_msgno.
+    ls_message-msgv1 = lv_msgv1.
+    ls_message-msgv2 = lv_msgv2.
+    ls_message-msgv3 = lv_msgv3.
+    ls_message-msgv4 = lv_msgv4.
+
+    CALL FUNCTION 'BAL_LOG_MSG_ADD'
+      EXPORTING
+        i_log_handle     = gs_log_handler
+        i_s_msg          = ls_message
+*   IMPORTING
+*       E_S_MSG_HANDLE   =
+*       E_MSG_WAS_LOGGED =
+*       E_MSG_WAS_DISPLAYED       =
+      EXCEPTIONS
+        log_not_found    = 1
+        msg_inconsistent = 2
+        log_is_full      = 3
+        OTHERS           = 4.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    CLEAR me->gv_empty.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_SY_MESSAGE
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD add_sy_message.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->ADD_TEXT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TYPE                        TYPE        SYMSGTY
+* | [--->] IV_TEXT                        TYPE        CLIKE
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD add_text.
+
+  DATA: ls_entry TYPE ty_log_entry.
+
+  GET TIME STAMP FIELD ls_entry-timestamp.
+  ls_entry-type = iv_type.
+  ls_entry-text = iv_text.
+
+  APPEND ls_entry TO mt_log.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->CONSTRUCTOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_EXTNUMBER                   TYPE        CLIKE(optional)
+* | [--->] IV_OBJECT                      TYPE        BALOBJ_D
+* | [--->] IV_SUBOBJECT                   TYPE        BALSUBOBJ
+* | [--->] IV_REPID                       TYPE        SY-REPID
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD constructor.
+
+* Inicializa todas las variables.
+    CLEAR:  me->gs_log_header,
+            me->gs_log_handler.
+
+* Inicializa las tablas.
+    REFRESH: me->gt_log_handler.
+
+    IF iv_extnumber IS SUPPLIED.
+      MOVE iv_extnumber TO gs_log_header-extnumber.   " Identificación externa.
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = gs_log_header-extnumber
+        IMPORTING
+          output = gs_log_header-extnumber.
+
+    ENDIF.
+
+    gs_log_header-object    = iv_object.              " 0bjeto.
+    gs_log_header-subobject = iv_subobject.           " 0bjeto inferior.
+    gs_log_header-aldate    = sy-datum.               " Fecha.
+    gs_log_header-altime    = sy-uzeit.               " Hora.
+    gs_log_header-aluser    = sy-uname.               " Nombre del usuario.
+    gs_log_header-alprog    = iv_repid.               " Nombre del programa.
+
+* Crea el log con los datos de cabecera.
+    CALL FUNCTION 'BAL_LOG_CREATE'
+      EXPORTING
+        i_s_log                 = gs_log_header
+      IMPORTING
+        e_log_handle            = gs_log_handler
+      EXCEPTIONS
+        log_header_inconsistent = 1
+        OTHERS                  = 2.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    APPEND gs_log_handler TO gt_log_handler.
+
+    me->gv_empty = abap_true.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->DISPLAY
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD display.
+    DATA: ls_profile TYPE bal_s_prof.
+
+    ls_profile-use_grid = 'X'.
+
+    CALL FUNCTION 'BAL_DSP_LOG_DISPLAY'
+      EXPORTING
+        i_s_display_profile  = ls_profile
+        i_t_log_handle       = gt_log_handler
+*       I_T_MSG_HANDLE       =
+*       I_S_LOG_FILTER       =
+*       I_S_MSG_FILTER       =
+*       I_T_LOG_CONTEXT_FILTER       =
+*       I_T_MSG_CONTEXT_FILTER       =
+*       I_AMODAL             = ' '
+*       I_SRT_BY_TIMSTMP     = ' '
+*   IMPORTING
+*       E_S_EXIT_COMMAND     =
+      EXCEPTIONS
+        profile_inconsistent = 1
+        internal_error       = 2
+        no_data_available    = 3
+        no_authority         = 4
+        OTHERS               = 5.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->FLUSH_TO_NAST_PROTOCOL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IS_NAST                        TYPE        NAST
+* | [<-->] CV_SUBRC                       TYPE        SY-SUBRC
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD flush_to_nast_protocol.
+
+  DATA: lv_line        TYPE ty_log_entry,
+        lv_text        TYPE string,
+        lv_formatted   TYPE string,
+        lv_timestamp_s TYPE char25.   " ✅ Compatible con CONCATENATE
+
+  LOOP AT mt_log INTO lv_line.
+
+    " 🔹 Convertir timestamp a texto legible
+    WRITE lv_line-timestamp TO lv_timestamp_s.
+
+    " 🔹 Formatear línea
+    CONCATENATE '[ ' lv_timestamp_s ' ]' '[ ' lv_line-type ' ]' lv_line-text
+      INTO lv_formatted SEPARATED BY space.
+
+    CONCATENATE lv_text lv_formatted cl_abap_char_utilities=>newline
+      INTO lv_text.
+  ENDLOOP.
+
+  " 🔹 Registrar en protocolo NAST
+  IF lv_text IS NOT INITIAL.
+    CALL FUNCTION 'NAST_PROTOCOL_UPDATE'
+      EXPORTING
+        msg_text    = lv_text
+        nast        = is_nast
+        return_code = cv_subrc.
+  ELSE.
+    cv_subrc = 0.
+  ENDIF.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->FLUSH_TO_SLG1
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD flush_to_slg1.
+
+    DATA: lv_log_handle TYPE balloghndl.
+    DATA lt_log_handle TYPE STANDARD TABLE OF balloghndl WITH EMPTY KEY.
+
+    " 🔹 Crear el log
+    CALL FUNCTION 'BAL_LOG_CREATE'
+      EXPORTING
+        object          = 'ZCFDI'
+        subobject       = 'TIMBRADO'
+        external_number = 'CFDI-LOG'
+      IMPORTING
+        log_handle      = lv_log_handle.
+
+    " 🔹 Agregar cada entrada del logger
+    LOOP AT mt_log INTO DATA(ls_entry).
+      CALL FUNCTION 'BAL_LOG_MSG_ADD'
+        EXPORTING
+          log_handle = lv_log_handle
+          msgid      = 'ZCFDI'
+          msgno      = '001'
+          msgty      = ls_entry-type
+          msgv1      = ls_entry-text.
+    ENDLOOP.
+
+    " 🔹 Registrar el log en la tabla interna
+    APPEND lv_log_handle TO lt_log_handle.
+
+    " 🔹 Guardar el log en la base de datos dentro del update task
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_in_update_task = 'X'         " 🔸 Esto es clave
+      TABLES
+        i_log_handle     = lt_log_handle.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->GET_ALL_TEXTS
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] RT_TEXTS                       TYPE        TY_LOGGER_TEXT
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD get_all_texts.
+
+  DATA: lv_line TYPE string.
+
+  LOOP AT mt_entries INTO DATA(ls_entry).
+    CONCATENATE ls_entry-type ls_entry-text INTO lv_line SEPARATED BY space.
+    APPEND lv_line TO rt_texts.
+  ENDLOOP.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->GET_AS_BAPIRET1
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] RT_MESSAGES                    TYPE        BAPIRET1_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_as_bapiret1.
+    DATA: lt_msg_handler TYPE bal_t_msgh,
+          ls_message     TYPE bal_s_msg,
+          ls_bapiret1    TYPE bapiret1,
+          lv_text        TYPE text1024.
+
+    FIELD-SYMBOLS: <ls_msg_handler> TYPE balmsghndl. " Work area para LT_MSG_HANDLER
+
+    IF me->gv_empty EQ abap_true.
+      RETURN.
+    ENDIF.
+
+    REFRESH rt_messages.
+    CALL FUNCTION 'BAL_DB_LOAD'
+      EXPORTING
+        i_t_log_handle     = gt_log_handler
+      IMPORTING
+        e_t_msg_handle     = lt_msg_handler
+      EXCEPTIONS
+        no_logs_specified  = 1
+        log_not_found      = 2
+        log_already_loaded = 3
+        OTHERS             = 4.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    LOOP AT lt_msg_handler ASSIGNING <ls_msg_handler>.
+
+      CALL FUNCTION 'BAL_LOG_MSG_READ'
+        EXPORTING
+          i_s_msg_handle = <ls_msg_handler>
+        IMPORTING
+          e_s_msg        = ls_message
+          e_txt_msg      = lv_text
+        EXCEPTIONS
+          log_not_found  = 1
+          msg_not_found  = 2
+          OTHERS         = 3.
+      IF sy-subrc NE 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+
+      CLEAR ls_bapiret1.
+      MOVE ls_message-msgty TO ls_bapiret1-type.
+      MOVE ls_message-msgid TO ls_bapiret1-id.
+      MOVE ls_message-msgno TO ls_bapiret1-number.
+      MOVE lv_text TO ls_bapiret1-message.
+      MOVE ls_message-msgv1 TO ls_bapiret1-message_v1.
+      MOVE ls_message-msgv2 TO ls_bapiret1-message_v2.
+      MOVE ls_message-msgv3 TO ls_bapiret1-message_v3.
+      MOVE ls_message-msgv4 TO ls_bapiret1-message_v4.
+      APPEND ls_bapiret1 TO rt_messages.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->GET_AS_BAPIRET2
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] RT_MESSAGES                    TYPE        BAPIRET2_TAB
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_as_bapiret2.
+    DATA: lt_msg_handler TYPE bal_t_msgh,
+          ls_message     TYPE bal_s_msg,
+          ls_bapiret2    TYPE bapiret2,
+          lv_text        TYPE text1024.
+
+    FIELD-SYMBOLS: <ls_msg_handler> TYPE balmsghndl. " Work area para LT_MSG_HANDLER
+
+    IF me->gv_empty EQ abap_true.
+      RETURN.
+    ENDIF.
+
+    REFRESH rt_messages.
+    CALL FUNCTION 'BAL_DB_LOAD'
+      EXPORTING
+        i_t_log_handle     = gt_log_handler
+      IMPORTING
+        e_t_msg_handle     = lt_msg_handler
+      EXCEPTIONS
+        no_logs_specified  = 1
+        log_not_found      = 2
+        log_already_loaded = 3
+        OTHERS             = 4.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+    LOOP AT lt_msg_handler ASSIGNING <ls_msg_handler>.
+
+      CALL FUNCTION 'BAL_LOG_MSG_READ'
+        EXPORTING
+          i_s_msg_handle = <ls_msg_handler>
+        IMPORTING
+          e_s_msg        = ls_message
+          e_txt_msg      = lv_text
+        EXCEPTIONS
+          log_not_found  = 1
+          msg_not_found  = 2
+          OTHERS         = 3.
+      IF sy-subrc NE 0.
+        MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      ENDIF.
+
+      CLEAR ls_bapiret2.
+      MOVE ls_message-msgty TO ls_bapiret2-type.
+      MOVE ls_message-msgid TO ls_bapiret2-id.
+      MOVE ls_message-msgno TO ls_bapiret2-number.
+      MOVE lv_text TO ls_bapiret2-message.
+      MOVE ls_message-msgv1 TO ls_bapiret2-message_v1.
+      MOVE ls_message-msgv2 TO ls_bapiret2-message_v2.
+      MOVE ls_message-msgv3 TO ls_bapiret2-message_v3.
+      MOVE ls_message-msgv4 TO ls_bapiret2-message_v4.
+      APPEND ls_bapiret2 TO rt_messages.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->GET_SUMMARY
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] RV_TEXT                        TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD get_summary.
+
+  DATA: lv_line        TYPE ty_log_entry,
+        lv_timestamp_s TYPE char25,
+        lv_formatted   TYPE string.
+
+  LOOP AT mt_log INTO lv_line.
+    WRITE lv_line-timestamp TO lv_timestamp_s.
+
+    CONCATENATE '[ ' lv_timestamp_s ' ]' '[ ' lv_line-type ' ]' lv_line-text
+      INTO lv_formatted SEPARATED BY space.
+
+    CONCATENATE rv_text lv_formatted cl_abap_char_utilities=>newline
+      INTO rv_text.
+  ENDLOOP.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->HAS_ENTRIES
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] RV_HAS_ENTRIES                 TYPE        ABAP_BOOL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD has_entries.
+
+  rv_has_entries = xsdbool( lines( mt_log ) > 0 ).
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->REFRESH
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD refresh.
+
+
+* Borra el log de la memoria
+    CALL FUNCTION 'BAL_LOG_REFRESH'
+      EXPORTING
+        i_log_handle  = gs_log_handler
+      EXCEPTIONS
+        log_not_found = 1
+        OTHERS        = 2.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      RETURN.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->RESET_ERROR_COUNT
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD reset_error_count.
+
+    CLEAR me->gv_errors.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->SAVE
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD save.
+
+    IF me->gv_empty EQ abap_true.
+      RETURN.
+    ENDIF.
+
+* Guarda los mensajes en la BD.
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_client         = sy-mandt
+        i_t_log_handle   = gt_log_handler
+      EXCEPTIONS
+        log_not_found    = 1
+        save_not_allowed = 2
+        numbering_error  = 3
+        OTHERS           = 4.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      RETURN.
+    ENDIF.
+
+* Borra el log de la memoria
+    CALL FUNCTION 'BAL_LOG_REFRESH'
+      EXPORTING
+        i_log_handle  = gs_log_handler
+      EXCEPTIONS
+        log_not_found = 1
+        OTHERS        = 2.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      RETURN.
+    ENDIF.
+
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->SAVE_ONLY
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD save_only.
+
+    IF me->gv_empty EQ abap_true.
+      RETURN.
+    ENDIF.
+
+* Guarda los mensajes en la BD.
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_client         = sy-mandt
+        i_t_log_handle   = gt_log_handler
+      EXCEPTIONS
+        log_not_found    = 1
+        save_not_allowed = 2
+        numbering_error  = 3
+        OTHERS           = 4.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+      RETURN.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_LOGGER->SET_EXTNUMBER
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] PV_EXTNUMBER                   TYPE        CLIKE
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD set_extnumber.
+
+    MOVE pv_extnumber TO gs_log_header-extnumber.   " Identificación externa.
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+      EXPORTING
+        input  = gs_log_header-extnumber
+      IMPORTING
+        output = gs_log_header-extnumber.
+
+* Cambia los datos de encabezado.
+    CALL FUNCTION 'BAL_LOG_HDR_CHANGE'
+      EXPORTING
+        i_log_handle            = gs_log_handler
+        i_s_log                 = gs_log_header
+      EXCEPTIONS
+        log_not_found           = 1
+        log_header_inconsistent = 2
+        OTHERS                  = 3.
+    IF sy-subrc NE 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+
+  ENDMETHOD.
+ENDCLASS.
