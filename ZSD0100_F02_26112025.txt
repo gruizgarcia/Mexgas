@@ -1,0 +1,2409 @@
+  "===============================================================
+  " Include ZSD0100_F02 (o el include donde resides NAST)
+  "===============================================================
+  TYPE-POOLS: sbdst.
+
+  "--- Tipos auxiliares
+  TYPES: ty_bapiret2_tab_x TYPE STANDARD TABLE OF bapiret2 WITH EMPTY KEY.
+  TYPES: ty_c70_x          TYPE c LENGTH 70.
+
+  FORM entry
+    USING
+      return_code TYPE sy-subrc
+      us_screen   TYPE c.                       "#EC CALLED "#EC NEEDED
+
+    DATA: lt_messages  TYPE ty_bapiret2_tab_x,
+          ls_message   TYPE bapiret2,
+          lv_has_error TYPE abap_bool,
+          lv_any_sw    TYPE abap_bool.
+
+    DATA: lv_belnr_s TYPE string,
+          lv_bukrs_s TYPE string,
+          lv_gjahr_s TYPE string,
+          lv_uuid_s  TYPE string.
+
+    CLEAR: lv_has_error, lv_any_sw.
+    return_code = 0.
+
+    IF nast-vstat IS INITIAL OR nast-vstat = '0'.
+
+      DATA: lv_vbeln TYPE vbrk-vbeln.
+      lv_vbeln = nast-objky.
+
+      DATA lo_cfdi TYPE REF TO zcl_cfdi40_nast.
+      DATA lx_any TYPE REF TO cx_root.  " <— para capturar error al crear el objeto
+
+      "=== Crear objeto de forma segura (no bloquear NAST si falla)
+      TRY.
+          CREATE OBJECT lo_cfdi.
+*          lo_cfdi->reset_context( ).
+        CATCH cx_root INTO lx_any.
+          APPEND VALUE bapiret2(
+            type       = 'E'
+            id         = c_log_objt
+            number     = '099'
+            message_v1 = 'Error creando objeto CFDI'
+            message_v2 = lv_vbeln
+            message_v3 = lx_any->get_text( )
+          ) TO lt_messages.
+          lv_has_error = abap_true.
+      ENDTRY.
+
+      DATA: sociedad  LIKE vbrk-bukrs,
+            v_erdat   TYPE vbrk-erdat,
+            lv_gjahr  TYPE zcfdi4_mxdi_xml-gjahr,
+            lv_fecha  TYPE sy-datum,
+            lv_idmsg  TYPE symsgid VALUE c_log_objt,  " <--- usa constante unificada
+            lv_errorx TYPE c.
+
+      DATA: wa_head TYPE zet_head_40,
+            ls_log  TYPE zcfdi_xml_log.
+
+      DATA: lv_uuid      TYPE zuuid,
+            lv_url       TYPE zqr40,
+            lv_xml_timb  TYPE string,
+            lv_fecha_tfd TYPE string.
+
+      DATA: lv_xml_req TYPE string,
+            lv_xreq    TYPE xstring.
+
+      DATA: lx_error   TYPE REF TO cx_root.
+
+      DATA: gv_e_uuid  TYPE zuuid,
+            gv_e_error TYPE string.
+
+      DATA :
+        ls_head_cfdi LIKE LINE OF gt_head_cfdi,
+        ls_det_cfdi  TYPE zet_det_40.
+
+      DATA gv_first_sales_order TYPE vbeln_va.
+      DATA:
+        lv_docid       TYPE swo_typeid,
+        lv_ok          TYPE abap_bool,
+        lv_descripcion TYPE so_obj_des.
+      DATA: lv_ok_gos  TYPE flag,
+            lv_msg_gos TYPE string.
+      factura_swo = nast-objky.
+      tipofactura = nast-kschl.
+      DATA: ev_success TYPE  flag,
+            ev_message TYPE  string.
+      DATA(lv_vbeln10) = lv_vbeln.
+
+      " validacion de Mes Cerrado.
+      DATA ok    TYPE abap_bool.
+      DATA ok_mes TYPE string.
+      DATA msgtx TYPE string.
+
+      DATA
+            lv_enc TYPE abap_encoding.
+
+      lv_enc = CONV abap_encoding( '4110' ).   " UTF-8
+
+      IF nast-kschl = 'ZRF1'.
+
+        SELECT SINGLE bukrs erdat gjahr fkdat INTO (sociedad, v_erdat, lv_gjahr, lv_fecha)
+          FROM vbrk WHERE vbeln = lv_vbeln.
+
+        PERFORM validar_mes_cerrado_fi USING sociedad lv_fecha 'S'
+                                       CHANGING msgtx ok.
+        "==Validación de Mes Contable.
+
+        IF msgtx IS INITIAL.
+
+          IF lv_gjahr IS INITIAL.
+            lv_gjahr = lv_fecha+0(4).
+          ENDIF.
+          SELECT SINGLE uuid INTO gv_e_uuid FROM zcfdi_head_40 WHERE belnr = lv_vbeln.
+          PERFORM validate_cfdi_40 USING nast-erdat gv_e_uuid lv_idmsg CHANGING gv_e_error.
+
+          IF gv_e_error IS INITIAL.
+            "=== Ejecutar flujo sólo si el objeto está disponible
+            IF lo_cfdi IS BOUND.
+              TRY.
+
+                  CALL FUNCTION 'ZDELETE_ANEXO_XML'
+                    EXPORTING
+                      factura = lv_vbeln
+                                EXCEPTIONS
+                                factura_invalida.
+*                  lo_cfdi->borrar_xml_log_belnr( iv_belnr = lv_vbeln ).
+
+                  PERFORM get_data_factura USING lv_vbeln lv_fecha lo_cfdi.
+                  PERFORM llena_tabla_pricipal_fm CHANGING gv_first_sales_order.
+
+                  READ TABLE gt_head_cfdi INTO ls_head_cfdi INDEX 1.
+                  IF sy-subrc = 0.
+                    MOVE-CORRESPONDING ls_head_cfdi TO wa_head.
+                  ENDIF.
+
+
+
+
+                  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+                    EXPORTING
+                      input  = lv_vbeln10
+                    IMPORTING
+                      output = lv_vbeln10.
+
+
+                  "Normaliza la tabla head y det , para recuperar en xml.
+                  lo_cfdi->ensure_det_loaded(
+                      EXPORTING
+                      iv_belnr = lv_vbeln
+                      iv_bukrs = ls_head_cfdi-bukrs
+                      iv_gjahr = ls_head_cfdi-gjahr ).
+*                    BREAK-POINT.
+
+                  " 1) set_data
+                  CALL METHOD lo_cfdi->set_data
+                    EXPORTING
+                      t_head_cfdi = gt_head_cfdi
+                      t_det_cfdi  = gt_det_cfdi.
+
+                  "== Recuperar y aplicar Método/Forma/Uso desde maestro si faltan en ls_head_cfdi
+                  DATA: lv_metpag      TYPE string,
+                        lv_formapago   TYPE string,
+                        lv_usocfdi     TYPE string,
+                        lv_nombre      TYPE string,
+                        lv_regfiscal_r TYPE string,
+                        lv_domfiscal   TYPE string,
+                        lv_exportacion TYPE string.
+
+
+                  lo_cfdi->recuperar_datos_cfdi_receptor(
+                    EXPORTING
+                      iv_kunnr = ls_head_cfdi-kunnr
+                      iv_vkorg = ls_head_cfdi-vkorg
+                      iv_vtweg = ls_head_cfdi-vtweg
+                      iv_spart = ls_head_cfdi-spart
+                    IMPORTING
+                      ev_metpag    = lv_metpag
+                      ev_formapago = lv_formapago
+                      ev_usocfdi   = lv_usocfdi
+                      ev_nombre    = lv_nombre
+                      ev_regfiscal = lv_regfiscal_r
+                      ev_domfiscal = lv_domfiscal
+                      ev_exportacion = lv_exportacion
+                      ).
+
+                  " MetodoPago: si falta en head, usa el de maestro
+                  IF ls_head_cfdi-metodo_pago IS INITIAL AND lv_metpag IS NOT INITIAL.
+                    ls_head_cfdi-metodo_pago = lv_metpag.   " PUE / PPD
+                  ENDIF.
+
+                  " UsoCFDI: si falta en head, usa el de maestro
+                  IF ls_head_cfdi-uso_cfdi IS INITIAL AND lv_usocfdi IS NOT INITIAL.
+                    ls_head_cfdi-uso_cfdi = lv_usocfdi.
+                  ENDIF.
+
+                  " Forma de pago
+                  IF ls_head_cfdi-forma_pago IS INITIAL AND lv_formapago IS NOT INITIAL.
+                    ls_head_cfdi-forma_pago = lv_formapago.
+                  ENDIF.
+
+                  " Exportación
+                  IF ls_head_cfdi-exportacion IS INITIAL AND lv_exportacion IS NOT INITIAL.
+                    ls_head_cfdi-exportacion = lv_exportacion.
+                  ENDIF.
+                  ls_head_cfdi-bldat = lv_fecha.
+                  ls_head_cfdi-uzeit = sy-uzeit.
+
+                  ls_head_cfdi-tipocambioxml = COND #( WHEN ls_head_cfdi-monedaxml = 'MXN' THEN 1 ELSE ls_head_cfdi-tipocambioxml ).
+
+
+                  " 2) build_xml + sanitizar + guardar RQ  (CORREGIDO)
+                  DATA: lt_xml TYPE zcl_cfdi40_nast=>ty_xml_tt.
+                  CLEAR lv_xml_req.
+
+                  " Generar XML CFDI 4.0 con iXML (NUEVO MÉTODO)
+                  "Aqui se esta llenado lv_xml_req.
+
+                  lv_xml_req = lo_cfdi->build_xml_ixml( EXPORTING is_head = ls_head_cfdi CHANGING ct_xml  = t_xml ).
+                  "Ya no es neceasrio.
+*                  lv_xml_req  = t_xml.
+
+                  " Si quedó vacío, no continúes
+                  IF lv_xml_req IS INITIAL.
+                    APPEND VALUE bapiret2(
+                      type       = 'E'
+                      id         = lv_idmsg
+                      number     = '010'
+                      message_v1 = 'XML vacío tras sanitizar'
+                      message_v2 = lv_vbeln
+                      message_v3 = lv_docid ) TO lt_messages.
+                    EXIT. "o CONTINUE según tu flujo
+                  ENDIF.
+                  " 3) Timbrado
+                  DATA: lv_err_xstr      TYPE xstring,
+                        lv_err_xml       TYPE string,
+                        lv_err_msg       TYPE string,
+                        lv_err_code      TYPE string,
+                        lv_xml_timb_orig TYPE xstring.
+                  CLEAR: lv_uuid, lv_url, lv_xml_timb, lv_fecha_tfd.
+
+*                  lv_xml_req = lo_cfdi->sanitize_xml_min( lv_xml_req ).
+
+                  CALL METHOD lo_cfdi->call_timbrado
+                    EXPORTING
+                      i_xml      = lv_xml_req "se coloca este ya que se cambio la logica
+                    IMPORTING
+                      e_uuid     = lv_uuid
+                      e_url      = lv_url
+                      e_xml_timb = lv_xml_timb
+                      e_err_xstr = lv_err_xstr
+                      e_err_xml  = lv_err_xml
+                      e_err_msg  = lv_err_msg
+                      e_err_code = lv_err_code.
+
+
+                  IF lv_xml_timb CS 'FechaTimbrado="'.
+                    FIND REGEX 'FechaTimbrado="([^"]+)"'
+                         IN lv_xml_timb SUBMATCHES lv_fecha_tfd.
+                  ENDIF.
+
+                  IF lv_uuid IS INITIAL.
+
+                    lv_descripcion = |CFDI_{ lv_vbeln10 }_Request.xml|.
+                    PERFORM anexa_xml_request USING lv_vbeln10 lv_descripcion.
+
+                    " --- Error de timbrado ---
+
+                    DATA lv_payload_err TYPE string.
+                    IF lv_err_xml IS NOT INITIAL.
+                      lv_payload_err = lv_err_xml.
+                    ELSE.
+                      lv_payload_err = lv_err_msg.
+                    ENDIF.
+
+                    CLEAR lv_xreq.
+                    " Asegura tipo string
+                    DATA(lv_payload_err_s) = CONV string( lv_payload_err ).  " <- si ya es string, no cambia nada
+
+                    CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+                      EXPORTING
+                        text     = lv_payload_err_s
+                        encoding = lv_enc
+                      IMPORTING
+                        buffer   = lv_xreq.
+
+
+                    lv_descripcion = |CFDI_{ lv_vbeln10 }_Error.xml|.
+
+                    CALL METHOD lo_cfdi->anexar_xml_gos
+                      EXPORTING
+                        iv_bukrs       = wa_head-bukrs
+                        iv_belnr       = lv_vbeln10
+                        iv_gjahr       = lv_gjahr
+                        iv_tipo        = 'ER'              " <-- corregido
+                        iv_descripcion = lv_descripcion
+                        iv_xml_str     = lv_payload_err_s        " STRING ya sanitizado
+                      IMPORTING
+                        ev_success     = lv_ok_gos
+                        ev_message     = lv_msg_gos.
+
+                    IF lv_ok_gos = abap_true OR lv_ok_gos = 'X'.
+                      APPEND VALUE bapiret2(
+                        type       = 'S'
+                        id         = lv_idmsg
+                        number     = '010'
+                        message_v1 = |CFDI_{ lv_vbeln10 }_Error.xml|
+                        message_v2 = lv_vbeln
+                        message_v3 = lv_docid ) TO lt_messages.
+                    ELSE.
+                      APPEND VALUE bapiret2(
+                        type       = 'E'
+                        id         = lv_idmsg
+                        number     = '010'
+                        message_v1 = lv_msg_gos
+                        message_v2 = lv_vbeln
+                        message_v3 = lv_docid ) TO lt_messages.
+                    ENDIF.
+
+
+
+
+                    CLEAR ls_log.
+                    ls_log-bukrs      = wa_head-bukrs.
+                    ls_log-belnr      = wa_head-belnr.
+                    ls_log-gjahr      = wa_head-gjahr.
+                    ls_log-tipo_doc   = 'ER'.
+                    ls_log-created_on = sy-datum.
+                    ls_log-created_at = sy-uzeit.
+                    ls_log-xml_req    = lv_xreq.
+                    MODIFY zcfdi_xml_log FROM ls_log.
+
+                    CLEAR ls_message.
+                    ls_message-type       = 'E'.
+                    ls_message-id         = lv_idmsg.
+                    ls_message-number     = '001'.
+                    ls_message-message_v1 = 'Error de timbrado'.
+                    ls_message-message_v2 = lv_vbeln.
+                    ls_message-message_v3 = lv_err_code.
+                    ls_message-message_v4 = lv_err_msg.
+                    APPEND ls_message TO lt_messages.
+                    lv_has_error = abap_true.
+
+                    " Detalle en Performance Assistant (XML de error)
+                    IF us_screen = 'X' AND sy-batch IS INITIAL.
+                      IF lv_ok = abap_true.
+                        APPEND VALUE bapiret2(
+                          type       = 'S'
+                          id         = lv_idmsg
+                          number     = '001'             " mismo del ‘Error de timbrado’
+                          message_v1 = 'XML de error anexado al GOS'
+                          message_v2 = lv_vbeln
+                          message_v3 = lv_docid ) TO lt_messages.
+                      ENDIF.
+
+                      lv_descripcion = |CFDI_Error{ lv_vbeln10 }|.
+                      CALL METHOD lo_cfdi->anexar_xml_gos
+                        EXPORTING
+                          iv_bukrs       = wa_head-bukrs
+                          iv_belnr       = lv_vbeln
+                          iv_gjahr       = lv_gjahr
+                          iv_tipo        = 'ER'
+                          iv_descripcion = lv_descripcion
+                          iv_xml_str     = lv_err_xml
+                        IMPORTING
+                          ev_success     = lv_ok_gos
+                          ev_message     = lv_msg_gos.
+
+                      DATA lv_vbeln_s TYPE string.
+                      lv_vbeln_s = lv_vbeln.
+*                    PERFORM pa_msg_with_longtext
+*                      USING  lv_idmsg
+*                             'E'
+*                             '001'
+*                             'Error timbrado'
+*                             lv_vbeln_s
+*                             lv_err_code
+*                             ''
+*                             lv_payload_err
+*                             us_screen.
+                    ENDIF.
+
+                  ELSE.
+
+                    lv_descripcion = |CFDI_{ lv_vbeln10 }_Timbrado.xml|.
+                    PERFORM anexa_xml USING lv_vbeln10 lv_descripcion.
+                    lv_descripcion = |CFDI_{ lv_vbeln10 }_Request2.xml|.
+                    PERFORM anexa_xml_request USING lv_vbeln10 lv_descripcion.
+
+                    CALL METHOD lo_cfdi->persist_zcfdi_tables
+                      EXPORTING
+                        iv_uuid         = lv_uuid
+                        iv_url          = lv_url
+                        iv_xml_timb_str = lv_xml_timb
+                        iv_vbeln        = lv_vbeln.
+
+                    APPEND VALUE bapiret2(
+                              type       = 'S'
+                              id         = c_log_objt
+                              number     = '000'             " “Factura timbrada”
+                              message_v1 = ev_success
+                              message_v2 = ev_message
+                              message_v3 = |Registrso BD Actualizados:{ lv_uuid }| ) TO lt_messages.
+
+                    " --- Exito Actualizo Texto de Poliza.
+                    DATA :
+                      lv_uuid_tx  TYPE zfid_uuid_cfdi,
+                      lv_belnr_tx TYPE zfid_noper.
+
+                    lv_uuid_tx  = CONV zfid_uuid_cfdi( lv_uuid ).
+                    lv_belnr_tx = lv_vbeln.
+
+                    CALL FUNCTION 'ZFI_UPDATE_TEXT'
+                      EXPORTING
+                        iv_belnr   = lv_belnr_tx
+                        iv_gjahr   = lv_gjahr
+                        iv_bukrs   = sociedad
+                        iv_uuid    = lv_uuid_tx
+                      IMPORTING
+                        ev_success = ev_success
+                        ev_message = ev_message.
+
+                    IF lv_ok = abap_true.
+                      APPEND VALUE bapiret2(
+                                       type       = 'W'
+                                       id         = c_log_objt
+                                       number     = '000'
+                                       message_v1 = ev_success
+                                       message_v2 = ev_message
+                                       message_v3 = |Actualizados Textos en Poliza:{ lv_uuid }| ) TO lt_messages.
+                    ENDIF.
+
+                    " --- Exito: persistir TI y tablas Z ---
+                    CLEAR lv_xreq.
+
+*                    CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+*                      EXPORTING
+*                        text     = lv_xml_timb
+*                        encoding = lv_enc
+*                      IMPORTING
+*                        buffer   = lv_xreq.
+
+                    CLEAR ls_log.
+                    ls_log-bukrs      = wa_head-bukrs.
+                    ls_log-belnr      = wa_head-belnr.
+                    ls_log-gjahr      = wa_head-gjahr.
+                    ls_log-tipo_doc   = 'TI'.
+                    ls_log-created_on = sy-datum.
+                    ls_log-created_at = sy-uzeit.
+                    ls_log-xml_req    = lv_xml_timb_orig.
+                    MODIFY zcfdi_xml_log FROM ls_log.
+
+                    " Mensaje: Timbrado Éxito (UUID + Fecha opcional)
+                    CLEAR ls_message.
+                    ls_message-type   = 'S'.
+                    ls_message-id     = lv_idmsg.
+                    ls_message-number = '000'.
+                    IF lv_fecha_tfd IS NOT INITIAL.
+                      CONCATENATE 'Timbrado Éxito UUID' lv_uuid lv_fecha_tfd INTO ls_message-message_v1 SEPARATED BY space.
+                    ELSE.
+                      CONCATENATE 'Timbrado Éxito UUID' lv_uuid INTO ls_message-message_v1 SEPARATED BY space.
+                    ENDIF.
+                    ls_message-message_v2 = lv_vbeln.
+                    APPEND ls_message TO lt_messages.
+
+                    " Mensaje: Factura Timbrada con el UUID
+                    CLEAR ls_message.
+                    ls_message-type       = 'S'.
+                    ls_message-id         = lv_idmsg.
+                    ls_message-number     = '000'.
+                    ls_message-message_v1 = 'Factura timbrada'.
+                    ls_message-message_v2 = lv_vbeln.
+                    ls_message-message_v3 = lv_uuid.
+                    APPEND ls_message TO lt_messages.
+
+                    SELECT  * INTO TABLE it_factura FROM zcfdi_head_40 WHERE belnr EQ lv_vbeln.
+                    " --- Recupera el PDF para despues adjuntarlo y dejarlo a la Function.
+                    PERFORM pdf_init
+                      TABLES
+                            it_factura
+                      USING
+                            us_screen
+                      CHANGING
+                            lf_retcode
+                            sociedad
+                            clasefactura
+                            orgventas.
+                    DATA: lv_descrip TYPE string,
+                          lv_archivo TYPE string.
+
+                    lv_descripcion = |CFDI_{ lv_vbeln10 }.pdf|.
+                    lv_archivo     = |CFDI_{ lv_vbeln10 }_Exito|.
+
+
+
+                    CALL FUNCTION 'ZAGREGA_FILE_VF02'
+                      EXPORTING
+                        factura     = factura_swo
+                        archivo     = lv_archivo
+                        descripcion = lv_descripcion
+                        servidor    = ''
+                      TABLES
+                        it_pdf      = it_pdf.
+
+                    APPEND VALUE bapiret2(
+                      type       = 'S'
+                      id         = lv_idmsg
+                      number     = '000'
+                      message_v1 = 'PDF Adjuntado GOS'
+                      message_v2 = lv_descrip
+                      message_v3 = lv_docid ) TO lt_messages.
+                    " Longtext informativo con el XML timbrado (opcional)
+                    IF us_screen = 'X' AND sy-batch IS INITIAL.
+                      DATA: lv_uuid_e TYPE string,
+                            lv_url_e  TYPE string,
+                            lv_xml_e  TYPE string.
+                      lv_uuid_e = lv_uuid.
+                      lv_url_e  = lv_url.
+                      lv_xml_e  = lv_xml_timb.
+*                    PERFORM pa_msg_with_longtext
+*                      USING  lv_idmsg
+*                             'S'
+*                             '000'
+*                             'Timbrado Éxito'
+*                             lv_uuid_e
+*                             lv_url_e
+*                             ''
+*                             lv_xml_e
+*                             us_screen.
+                    ENDIF.
+
+                  ENDIF. " lv_uuid IS INITIAL
+
+                CATCH cx_sy_move_cast_error
+                      cx_sy_conversion_error
+                      cx_sy_open_sql_db
+                      cx_sy_ref_is_initial
+                      cx_sy_dyn_call_illegal_type
+                      cx_sy_dyn_call_error
+                      cx_sy_arithmetic_error
+                      cx_sy_itab_line_not_found
+                      cx_root INTO lx_error.
+                  FREE lo_cfdi.
+                  CLEAR lo_cfdi.
+                  APPEND VALUE bapiret2(
+                    type       = 'E'
+                    id         = lv_idmsg
+                    number     = '099'
+                    message_v1 = 'Excepción en generación/timbrado'
+                    message_v2 = lv_vbeln
+                    message_v3 = lx_error->get_text( )
+                  ) TO lt_messages.
+                  lv_has_error = abap_true.
+
+              ENDTRY.
+
+            ELSE.
+              " Si no hay objeto, ya se registró el error arriba; continuar sin abortar.
+            ENDIF.
+
+          ELSE.
+            " Ya timbrado según validación
+            CLEAR ls_message.
+            ls_message-type       = 'W'.
+            ls_message-id         = lv_idmsg.
+            ls_message-number     = '002'.
+            ls_message-message_v1 = 'CFDI ya timbrado; se omite timbrado'.
+            ls_message-message_v2 = lv_vbeln.
+            ls_message-message_v3 = gv_e_uuid.
+            APPEND ls_message TO lt_messages.
+          ENDIF.
+        ELSE.
+          APPEND VALUE bapiret2(
+                   type       = 'E'
+                   id         = lv_idmsg
+                   number     = '001'             " mismo del ‘Error de timbrado’
+                   message_v1 = msgtx
+                   message_v2 = lv_vbeln
+                    ) TO lt_messages.
+        ENDIF.
+
+      ENDIF. " ZRF1
+
+    ENDIF. " vstat
+
+    " ---- Asegurar que SIEMPRE quede algo en el protocolo NAST (VN052) ----
+    PERFORM ensure_nast_protocol
+      USING    c_log_objt
+      CHANGING lt_messages.
+
+    " Protocolo NAST + popups
+    LOOP AT lt_messages INTO ls_message.
+
+      CALL FUNCTION 'NAST_PROTOCOL_UPDATE'
+        EXPORTING
+          msg_arbgb = ls_message-id
+          msg_nr    = ls_message-number
+          msg_ty    = ls_message-type
+          msg_v1    = ls_message-message_v1
+          msg_v2    = ls_message-message_v2
+          msg_v3    = ls_message-message_v3
+          msg_v4    = ls_message-message_v4
+        EXCEPTIONS
+          OTHERS    = 1.
+
+      IF ls_message-type = 'E'.
+        lv_has_error = abap_true.
+      ELSE.
+        lv_any_sw = abap_true.
+      ENDIF.
+
+*  *    IF us_screen = 'X' AND sy-batch IS INITIAL.
+*  *      DATA: lv_text TYPE string,
+*  *            l1      TYPE c LENGTH 70,
+*  *            l2      TYPE c LENGTH 70,
+*  *            l3      TYPE c LENGTH 70,
+*  *            l4      TYPE c LENGTH 70.
+*  *
+*  *      CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+*  *        EXPORTING
+*  *          msgid               = ls_message-id
+*  *          msgnr               = ls_message-number
+*  *          msgv1               = ls_message-message_v1
+*  *          msgv2               = ls_message-message_v2
+*  *          msgv3               = ls_message-message_v3
+*  *          msgv4               = ls_message-message_v4
+*  *        IMPORTING
+*  *          message_text_output = lv_text
+*  *        EXCEPTIONS
+*  *          OTHERS              = 1.
+*  *
+*  *      IF lv_text IS INITIAL.
+*  *        CONCATENATE ls_message-message_v1 ls_message-message_v2
+*  *                    ls_message-message_v3 ls_message-message_v4
+*  *               INTO lv_text SEPARATED BY space.
+*  *      ENDIF.
+*  *
+*  *      l1 = lv_text.
+*  *      IF strlen( lv_text ) > 70. SHIFT lv_text LEFT BY 70 PLACES. l2 = lv_text. ENDIF.
+*  *      IF strlen( lv_text ) > 70. SHIFT lv_text LEFT BY 70 PLACES. l3 = lv_text. ENDIF.
+*  *      IF strlen( lv_text ) > 70. SHIFT lv_text LEFT BY 70 PLACES. l4 = lv_text. ENDIF.
+*  *
+*  *      CALL FUNCTION 'POPUP_TO_INFORM'
+*  *        EXPORTING
+*  *          titel  = 'Resultado CFDI'
+*  *          txt1   = l1
+*  *          txt2   = l2
+*  *          txt3   = l3
+*  *          txt4   = l4
+*  *        EXCEPTIONS
+*  *          OTHERS = 1.
+*  *    ENDIF.
+
+    ENDLOOP.
+
+    " ---- Grabar también BAL (Application Log) como respaldo ----
+    DATA: lt_messages_h LIKE bapiret2 OCCURS 0 WITH HEADER LINE,
+          lv_extnumber  TYPE bal_s_log-extnumber.
+    lv_extnumber = nast-objky.
+    lt_messages_h[] = lt_messages[].
+    PERFORM write_process_log
+      TABLES lt_messages_h
+      USING  lv_extnumber.
+
+    FREE lo_cfdi.
+    CLEAR lo_cfdi.
+
+    IF lv_has_error = abap_true.
+      return_code = 1.
+      us_screen = 'X'.
+    ELSE.
+
+      return_code = 0.
+      us_screen = 'X'.
+    ENDIF.
+
+  ENDFORM.
+
+
+  "---------------------------------------------------------------
+  " FORM SPLIT_70X4 - Parte STRING en 4 líneas (compat sin offsets)
+  "---------------------------------------------------------------
+  FORM split_70x4 USING    iv_text TYPE string
+                  CHANGING ev_l1   TYPE ty_c70_x
+                           ev_l2   TYPE ty_c70_x
+                           ev_l3   TYPE ty_c70_x
+                           ev_l4   TYPE ty_c70_x.
+
+    DATA: lv_work TYPE string.
+
+    CLEAR: ev_l1 , ev_l2 , ev_l3 , ev_l4.
+    lv_work = iv_text.
+
+    IF lv_work IS NOT INITIAL.
+      ev_l1 = lv_work.   " truncado automático a 70
+    ENDIF.
+
+    IF strlen( lv_work ) > 70.
+      SHIFT lv_work LEFT BY 70 PLACES. ev_l2 = lv_work.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF strlen( lv_work ) > 70.
+      SHIFT lv_work LEFT BY 70 PLACES. ev_l3 = lv_work.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+    IF strlen( lv_work ) > 70.
+      SHIFT lv_work LEFT BY 70 PLACES. ev_l4 = lv_work.
+    ENDIF.
+
+  ENDFORM.
+
+  "---------------------------------------------------------------
+  " FORM ADD_XML_LOG_MSGS_SHOW - Popups (solo si us_screen='X')
+  "---------------------------------------------------------------
+  FORM add_xml_log_msgs_show
+    USING    iv_us_screen TYPE c
+    CHANGING ct_messages  TYPE ty_bapiret2_tab_x.
+
+    DATA: ls_msg  TYPE bapiret2,
+          lv_text TYPE string,
+          lv_all  TYPE string,
+          lv_l1   TYPE ty_c70_x,
+          lv_l2   TYPE ty_c70_x,
+          lv_l3   TYPE ty_c70_x,
+          lv_l4   TYPE ty_c70_x.
+
+    IF iv_us_screen <> 'X' OR sy-batch IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    LOOP AT ct_messages INTO ls_msg.
+      CLEAR lv_text.
+      CALL FUNCTION 'MESSAGE_TEXT_BUILD'
+        EXPORTING
+          msgid               = ls_msg-id
+          msgnr               = ls_msg-number
+          msgv1               = ls_msg-message_v1
+          msgv2               = ls_msg-message_v2
+          msgv3               = ls_msg-message_v3
+          msgv4               = ls_msg-message_v4
+        IMPORTING
+          message_text_output = lv_text
+        EXCEPTIONS
+          OTHERS              = 1.
+
+      IF lv_text IS INITIAL.
+        CONCATENATE ls_msg-message_v1 ls_msg-message_v2
+                    ls_msg-message_v3 ls_msg-message_v4
+               INTO lv_text SEPARATED BY space.
+      ENDIF.
+
+      CONCATENATE '[' ls_msg-type ']' lv_text INTO lv_all SEPARATED BY space.
+      PERFORM split_70x4 USING lv_all CHANGING lv_l1 lv_l2 lv_l3 lv_l4.
+
+      CALL FUNCTION 'POPUP_TO_INFORM'
+        EXPORTING
+          titel  = 'Resultado CFDI'
+          txt1   = lv_l1
+          txt2   = lv_l2
+          txt3   = lv_l3
+          txt4   = lv_l4
+        EXCEPTIONS
+          OTHERS = 1.
+    ENDLOOP.
+
+  ENDFORM.
+
+  "---------------------------------------------------------------
+  " FORM ADD_XML_LOG_MSGSX - Lee ZCFDI_XML_LOG y arma mensajes (6p)
+  "---------------------------------------------------------------
+  FORM add_xml_log_msgsx
+    USING    iv_bukrs      TYPE bukrs
+             iv_belnr      TYPE vbrk-vbeln
+             iv_gjahr      TYPE gjahr
+             iv_idmsg      TYPE symsgid
+             iv_us_screen  TYPE c
+    CHANGING ct_messages   TYPE ty_bapiret2_tab_x.
+
+    DATA: lt_log  TYPE STANDARD TABLE OF zcfdi_xml_log,
+          ls_log  TYPE zcfdi_xml_log,
+          ls_msg  TYPE bapiret2,
+          lv_msid TYPE symsgid,
+          lv_msnr TYPE symsgno,
+          lv_uuid TYPE zuuid,
+          lv_when TYPE string.
+
+    CLEAR lv_uuid.
+    SELECT SINGLE uuid INTO lv_uuid
+      FROM zcfdi_head_40
+      WHERE bukrs = iv_bukrs
+        AND belnr = iv_belnr
+        AND gjahr = iv_gjahr.
+
+    SELECT * INTO TABLE lt_log
+      FROM zcfdi_xml_log
+      WHERE bukrs = iv_bukrs
+        AND belnr = iv_belnr
+        AND gjahr = iv_gjahr.
+
+    IF sy-subrc <> 0.
+      CLEAR ls_msg.
+      ls_msg-type       = 'W'.
+      ls_msg-id         = '00'.
+      ls_msg-number     = '398'.
+      ls_msg-message_v1 = 'Sin registros en ZCFDI_XML_LOG'.
+      ls_msg-message_v2 = iv_belnr.
+      APPEND ls_msg TO ct_messages.
+
+      PERFORM add_xml_log_msgs_show USING iv_us_screen CHANGING ct_messages.
+      RETURN.
+    ENDIF.
+
+    SORT lt_log BY created_on created_at tipo_doc.
+
+    LOOP AT lt_log INTO ls_log.
+      CONCATENATE ls_log-created_on ls_log-created_at INTO lv_when SEPARATED BY space.
+
+      CLEAR: lv_msid, lv_msnr, ls_msg.
+      ls_msg-id = iv_idmsg.
+
+      CASE ls_log-tipo_doc.
+        WHEN 'RQ'.
+          lv_msid = iv_idmsg. lv_msnr = '010'.
+          ls_msg-type       = 'S'.
+          ls_msg-id         = lv_msid.
+          ls_msg-number     = lv_msnr.
+          ls_msg-message_v1 = 'XML de solicitud generado y guardado'.
+          ls_msg-message_v2 = iv_belnr.
+          ls_msg-message_v3 = lv_when.
+          APPEND ls_msg TO ct_messages.
+
+        WHEN 'TI'.
+          lv_msid = iv_idmsg. lv_msnr = '000'.
+          ls_msg-type       = 'S'.
+          ls_msg-id         = lv_msid.
+          ls_msg-number     = lv_msnr.
+          ls_msg-message_v1 = 'Factura timbrada'.
+          ls_msg-message_v2 = iv_belnr.
+          IF lv_uuid IS NOT INITIAL.
+            ls_msg-message_v3 = lv_uuid.
+          ELSE.
+            ls_msg-message_v3 = lv_when.
+          ENDIF.
+          APPEND ls_msg TO ct_messages.
+
+        WHEN 'ER'.
+          lv_msid = iv_idmsg.
+          lv_msnr = '001'.
+          ls_msg-type       = 'E'.
+          ls_msg-id         = lv_msid.
+          ls_msg-number     = lv_msnr.
+          ls_msg-message_v1 = 'Error de timbrado'.
+          ls_msg-message_v2 = iv_belnr.
+          ls_msg-message_v3 = lv_when.
+          APPEND ls_msg TO ct_messages.
+
+        WHEN OTHERS.
+          ls_msg-type       = 'I'.
+          ls_msg-id         = '00'.
+          ls_msg-number     = '398'.
+          ls_msg-message_v1 = 'Registro log'.
+          ls_msg-message_v2 = ls_log-tipo_doc.
+          ls_msg-message_v3 = lv_when.
+          APPEND ls_msg TO ct_messages.
+      ENDCASE.
+    ENDLOOP.
+
+    PERFORM add_xml_log_msgs_show USING iv_us_screen CHANGING ct_messages.
+
+  ENDFORM.
+
+  "---------------------------------------------------------------
+  " FORM ADD_XML_LOG_MSGSX_FLAGS - Wrapper 8 parámetros (compat)
+  "---------------------------------------------------------------
+  FORM add_xml_log_msgsx_flags
+    USING    iv_bukrs      TYPE bukrs
+             iv_belnr      TYPE vbrk-vbeln
+             iv_gjahr      TYPE gjahr
+             iv_idmsg      TYPE symsgid
+             iv_us_screen  TYPE c
+    CHANGING ct_messages   TYPE ty_bapiret2_tab_x
+             cv_has_error  TYPE abap_bool
+             cv_any_sw     TYPE abap_bool.
+
+    DATA: ls_m TYPE bapiret2.
+    CLEAR: cv_has_error , cv_any_sw.
+
+    PERFORM add_xml_log_msgsx
+      USING    iv_bukrs iv_belnr iv_gjahr iv_idmsg iv_us_screen
+      CHANGING ct_messages.
+
+    LOOP AT ct_messages INTO ls_m.
+      IF ls_m-type = 'E'.
+        cv_has_error = abap_true.
+      ELSEIF ls_m-type = 'S' OR ls_m-type = 'W' OR ls_m-type = 'I'.
+        cv_any_sw = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+  ENDFORM.
+
+*  ---------------------------------------------------------------------*
+*   Convierte un STRING a TLINE(132) – VERSIÓN TABLES (header line)
+*  ---------------------------------------------------------------------*
+  FORM string_to_tline
+    TABLES ct_tline STRUCTURE tline    " <-- requiere header line
+    USING  iv_text  TYPE string.
+
+
+    DATA: lv_len  TYPE i,
+          lv_off  TYPE i,
+          lv_take TYPE i.
+
+    " Compatible con releases antiguos
+    REFRESH ct_tline.    " borra la tabla (NO usar ct_tline[])
+    CLEAR   ct_tline.    " limpia la header line
+
+    lv_len = strlen( iv_text ).
+    lv_off = 0.
+
+    WHILE lv_off < lv_len.
+      CLEAR ct_tline.
+
+      lv_take = lv_len - lv_off.
+      IF lv_take > 132.
+        lv_take = 132.
+      ENDIF.
+
+      ct_tline-tdformat = '*'.
+      ct_tline-tdline   = iv_text+lv_off(lv_take).
+      APPEND ct_tline.              " usa la header line
+
+      lv_off = lv_off + 132.
+    ENDWHILE.
+
+  ENDFORM.
+
+*  ---------------------------------------------------------------------*
+*   FORM PA_MSG_WITH_LONGTEXT - Mensaje + longtext en Performance Assistant
+*  ---------------------------------------------------------------------*
+  FORM pa_msg_with_longtext
+    USING    iv_msgid   TYPE symsgid
+             iv_msgty   TYPE symsgty
+             iv_msgnr   TYPE symsgno
+             iv_msgv1   TYPE string
+             iv_msgv2   TYPE string
+             iv_msgv3   TYPE string
+             iv_msgv4   TYPE string
+             iv_longtxt TYPE string
+             iv_us_scr  TYPE c.
+
+    " Tabla con header line para TABLES (compatibilidad)
+    DATA: lt_long LIKE tline OCCURS 0 WITH HEADER LINE.
+
+    " Si tu release también acepta estándar sin header, dejamos esta variable,
+    " pero no es obligatoria para compilar:
+    DATA: lt_long_h TYPE STANDARD TABLE OF tline WITH HEADER LINE.
+
+    DATA lv_ok TYPE abap_bool VALUE abap_true.
+
+    IF iv_us_scr <> 'X' OR sy-batch IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    " Construir longtext desde el XML/texto largo
+    PERFORM string_to_tline
+      TABLES lt_long
+      USING  iv_longtxt.
+
+
+    " Adjuntar longtext al mensaje (Performance Assistant)
+    CALL FUNCTION 'MESSAGE_SET_LONGTEXT'
+      EXPORTING
+        arbgb    = iv_msgid
+        msgnr    = iv_msgnr
+        msgty    = iv_msgty
+      TABLES
+        longtext = lt_long.
+
+    " Copia opcional a tabla con header line estándar (para otras FMs)
+    CLEAR lt_long_h[].
+    LOOP AT lt_long INTO lt_long_h.
+      APPEND lt_long_h.
+    ENDLOOP.
+
+    " Inicializa colector y guarda mensaje corto (firma puede variar por release)
+    CALL FUNCTION 'MESSAGES_INITIALIZE'.
+
+    TRY.
+        CALL FUNCTION 'MESSAGE_STORE'
+          EXPORTING
+            arbgb = iv_msgid
+            msgty = iv_msgty
+            msgnr = iv_msgnr
+            msgv1 = iv_msgv1
+            msgv2 = iv_msgv2
+            msgv3 = iv_msgv3
+            msgv4 = iv_msgv4.
+      CATCH cx_sy_dyn_call_param_not_found cx_sy_dyn_call_illegal_type.
+        lv_ok = abap_false.
+    ENDTRY.
+
+    " Vuelve a setear longtext (seguro) y muestra PA o popup
+    CALL FUNCTION 'MESSAGE_SET_LONGTEXT'
+      EXPORTING
+        arbgb    = iv_msgid
+        msgnr    = iv_msgnr
+        msgty    = iv_msgty
+      TABLES
+        longtext = lt_long.
+
+    IF lv_ok = abap_true.
+      CALL FUNCTION 'MESSAGES_SHOW'.
+    ELSE.
+      " Fallback: popup 4 líneas
+      DATA: l1 TYPE c LENGTH 70,
+            l2 TYPE c LENGTH 70,
+            l3 TYPE c LENGTH 70,
+            l4 TYPE c LENGTH 70,
+            lw TYPE string.
+
+      lw = iv_longtxt.
+      l1 = lw.
+      IF strlen( lw ) > 70. SHIFT lw LEFT BY 70 PLACES. l2 = lw. ENDIF.
+      IF strlen( lw ) > 70. SHIFT lw LEFT BY 70 PLACES. l3 = lw. ENDIF.
+      IF strlen( lw ) > 70. SHIFT lw LEFT BY 70 PLACES. l4 = lw. ENDIF.
+
+      CALL FUNCTION 'POPUP_TO_INFORM'
+        EXPORTING
+          titel = 'Detalle de mensaje'
+          txt1  = l1
+          txt2  = l2
+          txt3  = l3
+          txt4  = l4.
+    ENDIF.
+
+  ENDFORM.
+*  ---------------------------------------------------------------------*
+*   Log de proceso (BAL) – versión compatible (TABLES + header line)
+*  ---------------------------------------------------------------------*
+  FORM write_process_log
+    TABLES ct_messages  STRUCTURE bapiret2
+    USING  iv_extnumber TYPE bal_s_log-extnumber.
+
+    DATA: lv_handle TYPE balloghndl,
+          ls_hdr    TYPE bal_s_log,
+          ls_bmsg   TYPE bal_s_msg.
+
+    CLEAR ls_hdr.
+    ls_hdr-object     = c_log_objt.
+    ls_hdr-subobject  = 'TIMBRADO'.
+    ls_hdr-extnumber  = iv_extnumber.
+
+    CALL FUNCTION 'BAL_LOG_CREATE'
+      EXPORTING
+        i_s_log      = ls_hdr
+      IMPORTING
+        e_log_handle = lv_handle
+      EXCEPTIONS
+        OTHERS       = 1.
+
+    LOOP AT ct_messages.
+      CLEAR ls_bmsg.
+      ls_bmsg-msgty = ct_messages-type.
+      ls_bmsg-msgid = ct_messages-id.
+      ls_bmsg-msgno = ct_messages-number.
+      ls_bmsg-msgv1 = ct_messages-message_v1.
+      ls_bmsg-msgv2 = ct_messages-message_v2.
+      ls_bmsg-msgv3 = ct_messages-message_v3.
+      ls_bmsg-msgv4 = ct_messages-message_v4.
+
+      CALL FUNCTION 'BAL_LOG_MSG_ADD'
+        EXPORTING
+          i_log_handle = lv_handle
+          i_s_msg      = ls_bmsg
+        EXCEPTIONS
+          OTHERS       = 1.
+    ENDLOOP.
+
+    CALL FUNCTION 'BAL_DB_SAVE'
+      EXPORTING
+        i_save_all = 'X'
+      EXCEPTIONS
+        OTHERS     = 1.
+
+  ENDFORM.
+
+*  ---------------------------------------------------------------------*
+*   Asegura que haya al menos 1 mensaje para el protocolo NAST
+*  ---------------------------------------------------------------------*
+  FORM ensure_nast_protocol
+    USING    iv_msgid     TYPE symsgid
+    CHANGING ct_messages  TYPE ty_bapiret2_tab_x.
+
+    DATA ls TYPE bapiret2.
+
+    IF ct_messages IS INITIAL.
+      CLEAR ls.
+      ls-type       = 'I'.
+      ls-id         = iv_msgid.
+      ls-number     = '398'.  " mensaje libre de 4 variables (clase 00/tu clase)
+      ls-message_v1 = 'Tratamiento ejecutado'.
+      ls-message_v2 = 'Sin mensajes adicionales'.
+      APPEND ls TO ct_messages.
+    ENDIF.
+
+  ENDFORM.
+*  ---------------------------------------------------------------------*
+*   Helper: STRING -> SOLIX_TAB (binario)
+*  ---------------------------------------------------------------------*
+*  ---------------------------------------------------------------------*
+*   Helper: STRING -> SOLIX_TAB
+*  ---------------------------------------------------------------------*
+  FORM string_to_solix
+    USING    iv_text TYPE string
+    CHANGING ct_hex  TYPE solix_tab.
+    DATA
+             lv_enc TYPE abap_encoding.
+
+    lv_enc = CONV abap_encoding( '4110' ).   " UTF-8
+    DATA: lv_xstr TYPE xstring.
+
+    CLEAR ct_hex.
+    CLEAR lv_xstr.
+    IF iv_text IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+      EXPORTING
+        text     = iv_text
+        encoding = lv_enc         " UTF-8
+      IMPORTING
+        buffer   = lv_xstr
+      EXCEPTIONS
+        failed   = 1
+        OTHERS   = 2.
+    IF sy-subrc <> 0 OR lv_xstr IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+      EXPORTING
+        buffer     = lv_xstr
+      TABLES
+        binary_tab = ct_hex.
+  ENDFORM.
+
+*  ---------------------------------------------------------------------*
+*   Helper: obtener OBJKEY de MESSAGE de forma robusta
+*  ---------------------------------------------------------------------*
+  FORM sofo_objkey_from_info
+    USING    is_info    TYPE sofolenti1
+    CHANGING ev_objkey  TYPE swo_typeid
+             ev_docid   TYPE string.
+
+    FIELD-SYMBOLS: <f_any> TYPE any.
+    DATA: lv_objtp TYPE string,
+          lv_objyr TYPE string,
+          lv_objno TYPE string.
+
+    CLEAR: ev_objkey, ev_docid.
+
+    ASSIGN COMPONENT 'OBJECT_ID' OF STRUCTURE is_info TO <f_any>.
+    IF sy-subrc = 0 AND <f_any> IS ASSIGNED AND <f_any> IS NOT INITIAL.
+      ev_objkey = CONV swo_typeid( <f_any> ).
+      ev_docid  = CONV string( <f_any> ).
+      RETURN.
+    ENDIF.
+
+    ASSIGN COMPONENT 'OBJTP'     OF STRUCTURE is_info TO <f_any>.
+    IF sy-subrc = 0 AND <f_any> IS ASSIGNED. lv_objtp = <f_any>. ENDIF.
+    IF lv_objtp IS INITIAL.
+      ASSIGN COMPONENT 'OBJ_TYPE' OF STRUCTURE is_info TO <f_any>.
+      IF sy-subrc = 0 AND <f_any> IS ASSIGNED. lv_objtp = <f_any>. ENDIF.
+    ENDIF.
+
+    ASSIGN COMPONENT 'OBJYR'     OF STRUCTURE is_info TO <f_any>.
+    IF sy-subrc = 0 AND <f_any> IS ASSIGNED. lv_objyr = <f_any>. ENDIF.
+    IF lv_objyr IS INITIAL.
+      ASSIGN COMPONENT 'OBJ_YEAR' OF STRUCTURE is_info TO <f_any>.
+      IF sy-subrc = 0 AND <f_any> IS ASSIGNED. lv_objyr = <f_any>. ENDIF.
+    ENDIF.
+
+    ASSIGN COMPONENT 'OBJNO'     OF STRUCTURE is_info TO <f_any>.
+    IF sy-subrc = 0 AND <f_any> IS ASSIGNED. lv_objno = <f_any>. ENDIF.
+    IF lv_objno IS INITIAL.
+      ASSIGN COMPONENT 'OBJ_NO'   OF STRUCTURE is_info TO <f_any>.
+      IF sy-subrc = 0 AND <f_any> IS ASSIGNED. lv_objno = <f_any>. ENDIF.
+    ENDIF.
+
+    IF lv_objtp IS NOT INITIAL AND lv_objyr IS NOT INITIAL AND lv_objno IS NOT INITIAL.
+      CONCATENATE lv_objtp lv_objyr lv_objno INTO ev_objkey.
+      ev_docid = lv_objno.
+    ELSE.
+      CLEAR: ev_objkey, ev_docid.
+    ENDIF.
+
+  ENDFORM.
+*  ---------------------------------------------------------------------*
+*   FORM GOS_ATTACH_XML_PAC - Adjunta STRING (XML) a GOS de VBRK (BUS2081)
+*     -> Crea documento BDS y lo vincula (ATTA). Visible en "Lista de anexos".
+*  ---------------------------------------------------------------------*
+  FORM gos_attach_xml_pac
+    USING
+             iv_vbeln TYPE vbrk-vbeln     " Nº factura
+             iv_xml   TYPE string         " XML
+             iv_tipo  TYPE char2          " 'RQ' / 'ER' / 'TI'
+    CHANGING cv_docid TYPE string         " Devuelve ID del adjunto (opcional)
+             cv_ok    TYPE abap_bool.     " Éxito
+
+    DATA: ls_obj     TYPE borident,
+          lv_vbeln10 TYPE vbrk-vbeln,
+          lv_fname   TYPE string,
+          lv_descr   TYPE so_obj_des,
+          lt_hex     TYPE solix_tab,
+          lv_size    TYPE i.
+
+    DATA lv_enc TYPE abap_encoding.
+    lv_enc = CONV abap_encoding( '4110' ).   " UTF-8
+
+    CLEAR: cv_docid, cv_ok.
+
+    " 1) Normalizar clave BUS2081
+    lv_vbeln10 = iv_vbeln.
+*    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+*      EXPORTING
+*        input  = lv_vbeln10
+*      IMPORTING
+*        output = lv_vbeln10.
+
+    ls_obj-objtype = 'BUS2081'.
+    ls_obj-objkey  = lv_vbeln10.
+
+    " 2) Nombre del archivo
+    CASE iv_tipo.
+      WHEN 'RQ'.   lv_fname = |CFDI_{ lv_vbeln10 }_request.xml|.
+      WHEN 'ER'.   lv_fname = |CFDI_{ lv_vbeln10 }_error.xml|.
+      WHEN OTHERS. lv_fname = |CFDI_{ lv_vbeln10 }_timbrado.xml|.
+    ENDCASE.
+    lv_descr = lv_fname.
+    " 3) STRING -> SOLIX_TAB con clase (sin RETURNING)
+    DATA: lo_conv TYPE REF TO cl_abap_conv_out_ce,
+          lv_xstr TYPE xstring.
+
+    lo_conv = cl_abap_conv_out_ce=>create( encoding = lv_enc ).
+    lo_conv->convert( EXPORTING data = iv_xml ).   " no retorna
+    lv_xstr = lo_conv->get_buffer( ).              " obtén el xstring
+
+    CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+      EXPORTING
+        buffer        = lv_xstr
+      IMPORTING
+        output_length = lv_size
+      TABLES
+        binary_tab    = lt_hex.
+
+    DATA: lo_srv TYPE REF TO cl_gos_document_service,
+          ls_att TYPE borident-objkey.
+
+    " Objeto BOR de la factura
+    ls_obj-objtype = 'BUS2081'.
+    ls_obj-objkey  = lv_vbeln10.
+    CREATE OBJECT lo_srv.
+    " 4) Crear adjunto vía GOS (BDS). Esto lo deja visible en la lista.
+    TRY.
+
+        DATA(lv_att_id) = VALUE so_entryid( ).
+
+        CALL METHOD lo_srv->create_attachment
+          EXPORTING
+            is_object     = ls_obj
+*           iv_description = lv_descr      " o ip_descr
+*           iv_file_name  = lv_fname      " o ip_filename
+*           it_content_hex = lt_hex
+          IMPORTING
+            ep_attachment = ls_att        " si existe en tu firma
+          EXCEPTIONS
+            OTHERS        = 1.
+
+        cv_docid = lv_att_id.
+        cv_ok    = abap_true.
+
+      CATCH cx_sy_dyn_call_param_not_found
+            cx_sy_dyn_call_illegal_type.
+    ENDTRY.
+
+  ENDFORM.
+  FORM anexa_xml_gos
+    USING
+      p_bukrs     TYPE bukrs
+      p_belnr     TYPE vbrk-vbeln
+      p_gjahr     TYPE gjahr
+      p_tipo      TYPE char2        " 'TI' 'RQ' 'ER' 'AL'
+      p_desc      TYPE so_obj_des
+      p_xml_str   TYPE string       " opcional: XML timbrado como STRING
+    CHANGING
+      p_success   TYPE flag
+      p_message   TYPE string.
+
+    "--------------------------
+    " Inicialización / helpers
+    "--------------------------
+    DATA: lv_vbeln10   TYPE vbrk-vbeln,
+          lv_desc_base TYPE so_obj_des,
+          lv_tipo      TYPE char2,
+          lv_lines     TYPE i.
+
+    DATA: ls_fol_id   TYPE soodk,
+          ls_obj_id   TYPE soodk,
+          ls_obj_data TYPE sood1,
+          lt_objhead  TYPE soli_tab,
+          lt_soli     TYPE soli_tab,
+          lt_solix    TYPE solix_tab,
+          ls_object   TYPE borident,
+          ls_note     TYPE borident,
+          ls_folmem_k TYPE sofmk,
+          lv_ep_note  TYPE borident-objkey.
+
+    DATA: ls_xml40    TYPE zcfdi_40_xml,
+          lt_log      TYPE STANDARD TABLE OF zcfdi_xml_log,
+          ls_log      TYPE zcfdi_xml_log,
+          ls_head     TYPE zcfdi_head_40,
+          lv_any_done TYPE abap_bool VALUE abap_false.
+
+    FIELD-SYMBOLS: <fs_any> TYPE any.
+
+    CLEAR: p_success, p_message.
+
+    "--------------------------
+    " Validaciones básicas
+    "--------------------------
+    IF p_bukrs IS INITIAL OR p_belnr IS INITIAL OR p_gjahr IS INITIAL.
+      p_message = 'Parámetros obligatorios vacíos (BUKRS/BELNR/GJAHR).'.
+      p_success = abap_false.
+      EXIT.
+    ENDIF.
+
+    " VBELN a 10 (ALPHA)
+    lv_vbeln10 = p_belnr.
+*    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+*      EXPORTING
+*        input  = lv_vbeln10
+*      IMPORTING
+*        output = lv_vbeln10.
+
+    " Normaliza tipo
+    lv_tipo = p_tipo.
+    TRANSLATE lv_tipo TO UPPER CASE.
+    IF lv_tipo IS INITIAL.
+      lv_tipo = 'AL'.
+    ENDIF.
+
+    " Descripción base
+    IF p_desc IS INITIAL.
+      CONCATENATE 'XML CFDI' lv_vbeln10 INTO lv_desc_base SEPARATED BY space.
+    ELSE.
+      lv_desc_base = p_desc.
+    ENDIF.
+
+    " Carpeta SAPoffice (B = privado)
+    CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET'
+      EXPORTING
+        region    = 'B'
+      IMPORTING
+        folder_id = ls_fol_id.
+    IF sy-subrc <> 0 OR ls_fol_id-objtp IS INITIAL.
+      p_message = 'No se obtuvo carpeta SAPoffice (SO_FOLDER_ROOT_ID_GET).'.
+      p_success = abap_false.
+      EXIT.
+    ENDIF.
+
+    "--------------------------
+    " 1) Construir contenido lt_soli
+    "    Preferencia: p_xml_str (STRING) -> BD
+    "--------------------------
+    REFRESH lt_soli.
+
+    " A) Si viene STRING por parámetro, úsalo tal cual
+    IF p_xml_str IS NOT INITIAL.
+      CALL FUNCTION 'SO_STRING_TO_TAB'
+        EXPORTING
+          content_str = p_xml_str
+        TABLES
+          content_tab = lt_soli.
+      IF lt_soli IS NOT INITIAL.
+        lv_any_done = abap_true.
+      ENDIF.
+    ENDIF.
+
+    " B) Si aún no hay contenido y el TIPO lo pide, busca en tablas Z
+    IF lv_any_done = abap_false AND ( lv_tipo = 'TI' OR lv_tipo = 'AL' ).
+      " ZCFDI_40_XML (STRING)
+      CLEAR ls_xml40.
+      SELECT SINGLE * INTO ls_xml40 FROM zcfdi_40_xml WHERE factura = lv_vbeln10.
+      IF sy-subrc = 0 AND ls_xml40-xml IS NOT INITIAL.
+        CALL FUNCTION 'SO_STRING_TO_TAB'
+          EXPORTING
+            content_str = ls_xml40-xml
+          TABLES
+            content_tab = lt_soli.
+        IF lt_soli IS NOT INITIAL.
+          lv_any_done = abap_true.
+        ENDIF.
+      ENDIF.
+
+      " Fallback: ZCFDI_XML_LOG tipo 'TI' (XSTRING)
+      IF lv_any_done = abap_false.
+        REFRESH lt_log.
+        SELECT * INTO TABLE lt_log
+          FROM zcfdi_xml_log
+          WHERE bukrs = p_bukrs
+            AND belnr = lv_vbeln10
+            AND gjahr = p_gjahr
+            AND tipo_doc = 'TI'.
+        IF sy-subrc = 0.
+          SORT lt_log BY created_on DESCENDING created_at DESCENDING.
+          READ TABLE lt_log INTO ls_log INDEX 1.
+          IF sy-subrc = 0 AND ls_log-xml_req IS NOT INITIAL.
+            REFRESH lt_solix.
+            CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+              EXPORTING
+                buffer     = ls_log-xml_req
+              TABLES
+                binary_tab = lt_solix.
+            CALL FUNCTION 'SO_SOLIXTAB_TO_SOLITAB'
+              EXPORTING
+                ip_solixtab = lt_solix
+              IMPORTING
+                ep_solitab  = lt_soli.
+            IF lt_soli IS NOT INITIAL.
+              lv_any_done = abap_true.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      " Fallback: ZCFDI_HEAD_40 (intenta campos típicos, string/xstring)
+      IF lv_any_done = abap_false.
+        CLEAR ls_head.
+        SELECT SINGLE * INTO ls_head
+          FROM zcfdi_head_40
+          WHERE bukrs = p_bukrs
+            AND belnr = lv_vbeln10
+            AND gjahr = p_gjahr.
+        IF sy-subrc = 0.
+          DATA lt_try_ti TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
+          APPEND 'XML_TIMB'     TO lt_try_ti.
+          APPEND 'XML_TIMBRADO' TO lt_try_ti.
+          APPEND 'XML_TFD'      TO lt_try_ti.
+          APPEND 'XML'          TO lt_try_ti.
+          LOOP AT lt_try_ti INTO DATA(lv_name).
+            ASSIGN COMPONENT lv_name OF STRUCTURE ls_head TO <fs_any>.
+            IF sy-subrc = 0 AND <fs_any> IS ASSIGNED AND <fs_any> IS NOT INITIAL.
+              " Primero como STRING
+              DATA(lv_try_s) = ``.
+              TRY.
+                  lv_try_s = CONV string( <fs_any> ).
+                CATCH cx_sy_move_cast_error cx_sy_conversion_error.
+              ENDTRY.
+              IF lv_try_s IS NOT INITIAL.
+                REFRESH lt_soli.
+                CALL FUNCTION 'SO_STRING_TO_TAB'
+                  EXPORTING
+                    content_str = lv_try_s
+                  TABLES
+                    content_tab = lt_soli.
+              ENDIF.
+              " Si no, como XSTRING
+              IF lt_soli IS INITIAL.
+                DATA(lv_try_x) = CONV xstring( '' ).
+                TRY.
+                    lv_try_x = CONV xstring( <fs_any> ).
+                  CATCH cx_sy_move_cast_error cx_sy_conversion_error.
+                ENDTRY.
+                IF lv_try_x IS NOT INITIAL.
+                  REFRESH lt_solix.
+                  CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+                    EXPORTING
+                      buffer     = lv_try_x
+                    TABLES
+                      binary_tab = lt_solix.
+                  CALL FUNCTION 'SO_SOLIXTAB_TO_SOLITAB'
+                    EXPORTING
+                      ip_solixtab = lt_solix
+                    IMPORTING
+                      ep_solitab  = lt_soli.
+                ENDIF.
+              ENDIF.
+              IF lt_soli IS NOT INITIAL.
+                lv_any_done = abap_true.
+                EXIT.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " RQ (si se pidió explícito o AL y aún no adjuntaste nada)
+    IF lv_any_done = abap_false AND ( lv_tipo = 'RQ' OR lv_tipo = 'AL' ).
+      REFRESH lt_log.
+      SELECT * INTO TABLE lt_log
+        FROM zcfdi_xml_log
+        WHERE bukrs = p_bukrs
+          AND belnr = lv_vbeln10
+          AND gjahr = p_gjahr
+          AND tipo_doc = 'RQ'.
+      IF sy-subrc = 0.
+        SORT lt_log BY created_on DESCENDING created_at DESCENDING.
+        READ TABLE lt_log INTO ls_log INDEX 1.
+        IF sy-subrc = 0 AND ls_log-xml_req IS NOT INITIAL.
+          REFRESH lt_solix.
+          CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+            EXPORTING
+              buffer     = ls_log-xml_req
+            TABLES
+              binary_tab = lt_solix.
+          CALL FUNCTION 'SO_SOLIXTAB_TO_SOLITAB'
+            EXPORTING
+              ip_solixtab = lt_solix
+            IMPORTING
+              ep_solitab  = lt_soli.
+          IF lt_soli IS NOT INITIAL.
+            lv_any_done = abap_true.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " ER (si se pidió explícito o AL y aún no adjuntaste nada)
+    IF lv_any_done = abap_false AND ( lv_tipo = 'ER' OR lv_tipo = 'AL' ).
+      REFRESH lt_log.
+      SELECT * INTO TABLE lt_log
+        FROM zcfdi_xml_log
+        WHERE bukrs = p_bukrs
+          AND belnr = lv_vbeln10
+          AND gjahr = p_gjahr
+          AND tipo_doc = 'ER'.
+      IF sy-subrc = 0.
+        SORT lt_log BY created_on DESCENDING created_at DESCENDING.
+        READ TABLE lt_log INTO ls_log INDEX 1.
+        IF sy-subrc = 0 AND ls_log-xml_req IS NOT INITIAL.
+          REFRESH lt_solix.
+          CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+            EXPORTING
+              buffer     = ls_log-xml_req
+            TABLES
+              binary_tab = lt_solix.
+          CALL FUNCTION 'SO_SOLIXTAB_TO_SOLITAB'
+            EXPORTING
+              ip_solixtab = lt_solix
+            IMPORTING
+              ep_solitab  = lt_soli.
+          IF lt_soli IS NOT INITIAL.
+            lv_any_done = abap_true.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF lt_soli IS INITIAL.
+      p_message = |No hay XML para adjuntar (tipo={ lv_tipo }).|.
+      p_success = abap_false.
+      EXIT.
+    ENDIF.
+
+    "--------------------------
+    " 2) Insertar en SO + vincular a BUS2081 (sin COMMIT)
+    "--------------------------
+    CLEAR ls_obj_data.
+    ls_obj_data-objsns   = 'O'.
+    ls_obj_data-objla    = sy-langu.
+    ls_obj_data-objdes   = lv_desc_base.
+    ls_obj_data-file_ext = 'XML'.
+    DESCRIBE TABLE lt_soli LINES lv_lines.
+    ls_obj_data-objlen   = lv_lines * 510.
+
+    CALL FUNCTION 'SO_OBJECT_INSERT'
+      EXPORTING
+        folder_id        = ls_fol_id
+        object_type      = 'RAW'
+        object_hd_change = ls_obj_data
+      IMPORTING
+        object_id        = ls_obj_id
+      TABLES
+        objhead          = lt_objhead
+        objcont          = lt_soli.
+    IF sy-subrc <> 0.
+      p_message = 'Error al crear objeto SAPoffice (SO_OBJECT_INSERT).'.
+      p_success = abap_false.
+      EXIT.
+    ENDIF.
+
+    ls_object-objtype = 'BUS2081'.
+    ls_object-objkey  = lv_vbeln10.
+
+    ls_folmem_k-foltp = ls_fol_id-objtp.
+    ls_folmem_k-folyr = ls_fol_id-objyr.
+    ls_folmem_k-folno = ls_fol_id-objno.
+    ls_folmem_k-doctp = ls_obj_id-objtp.
+    ls_folmem_k-docyr = ls_obj_id-objyr.
+    ls_folmem_k-docno = ls_obj_id-objno.
+    lv_ep_note        = ls_folmem_k.
+
+    ls_note-objtype   = 'MESSAGE'.
+    ls_note-objkey    = lv_ep_note.
+
+    CALL FUNCTION 'BINARY_RELATION_CREATE'
+      EXPORTING
+        obj_rolea      = ls_object
+        obj_roleb      = ls_note
+        relationtype   = 'ATTA'
+      EXCEPTIONS
+        no_model       = 1
+        internal_error = 2
+        unknown        = 3
+        OTHERS         = 4.
+
+    IF sy-subrc = 0.
+      p_success = abap_true.
+      p_message = |Adjunto GOS creado para { lv_vbeln10 } (tipo={ lv_tipo }).|.
+    ELSE.
+      p_success = abap_false.
+      p_message = |Objeto creado, pero falló relación GOS (ATTA) para { lv_vbeln10 } (tipo={ lv_tipo }).|.
+    ENDIF.
+
+  ENDFORM.                    " anexa_xml_gos
+
+  FORM pdf_init
+                  TABLES it_factura
+                  USING proc_screen
+                  CHANGING cf_retcode sociedad clasefactura orgventas
+
+                    .
+
+    DATA: ls_print_data_to_read TYPE lbbil_print_data_to_read.
+    DATA: ls_bil_invoice TYPE lbbil_invoice.
+    DATA: lf_fm_name            TYPE rs38l_fnam.
+    DATA: ls_control_param      TYPE ssfctrlop.
+    DATA: ls_composer_param     TYPE ssfcompop.
+    DATA: ls_recipient          TYPE swotobjid.
+    DATA: ls_sender             TYPE swotobjid.
+    DATA: lf_formname           TYPE tdsfname.
+    DATA: ls_addr_key           LIKE addr_key.
+    DATA: ls_dlv_land           LIKE vbrk-land1.
+    DATA: ls_job_info           TYPE ssfcrescl.
+    DATA: wa_fac                TYPE lbbil_hd_gen.
+    DATA: l_rfbsk               TYPE rfbsk.
+    DATA: ls_tvarvc             TYPE tvarvc.
+
+    SELECT SINGLE * FROM tvarvc INTO ls_tvarvc WHERE name = 'CFDI40_PDF'.
+*   SmartForm from customizing table TNAPR
+    lf_formname = ls_tvarvc-low.
+*   determine print data
+    PERFORM set_print_data_to_read USING    lf_formname
+                                   CHANGING ls_print_data_to_read
+                                   cf_retcode.
+
+    IF cf_retcode = 0.
+*   select print data
+      PERFORM get_data USING    ls_print_data_to_read
+                       CHANGING ls_addr_key
+                                ls_dlv_land
+                                ls_bil_invoice
+                                cf_retcode.
+
+      sociedad     = ls_bil_invoice-hd_org-comp_code.
+      clasefactura = ls_bil_invoice-hd_gen-bil_type.
+      orgventas    = ls_bil_invoice-hd_org-salesorg.
+
+      IF orgventas = 'ALF1' OR orgventas = 'ALF2'.
+        MESSAGE 'Org. de Ventas no Factura Electrònicamente.' TYPE 'E'.
+        EXIT.
+      ENDIF.
+
+    ENDIF.
+
+    IF cf_retcode = 0.
+      PERFORM set_print_param USING    ls_addr_key
+                                       ls_dlv_land
+                              CHANGING ls_control_param
+                                       ls_composer_param
+                                       ls_recipient
+                                       ls_sender
+                                       cf_retcode.
+    ENDIF.
+
+    IF cf_retcode = 0.
+*   determine smartform function module for invoice
+      CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+        EXPORTING
+          formname           = lf_formname
+*         variant            = ' '
+*         direct_call        = ' '
+        IMPORTING
+          fm_name            = lf_fm_name
+        EXCEPTIONS
+          no_form            = 1
+          no_function_module = 2
+          OTHERS             = 3.
+      IF sy-subrc <> 0.
+*     error handling
+        cf_retcode = sy-subrc.
+        PERFORM protocol_update.
+      ENDIF.
+    ENDIF.
+
+    IF cf_retcode = 0.
+      PERFORM check_repeat.
+      IF ls_composer_param-tdcopies EQ 0.
+        nast_anzal = 1.
+      ELSE.
+        nast_anzal = ls_composer_param-tdcopies.
+      ENDIF.
+      ls_composer_param-tdcopies = 1.
+      DO nast_anzal TIMES.
+*   In case of repetition only one time archiving
+        IF sy-index > 1 AND nast-tdarmod = 3.
+          nast_tdarmod = nast-tdarmod.
+          nast-tdarmod = 1.
+          ls_composer_param-tdarmod = 1.
+        ENDIF.
+        IF sy-index NE 1 AND repeat IS INITIAL.
+          repeat = 'X'.
+        ENDIF.
+*   Siempre se manda como parametro de idioma el S ya que estaba molestando con los textos del samrtform
+        ls_control_param-langu = 'S'.
+
+*        READ table ls_bil_invoice-HD_GEN into wa_fac index 1.
+        SELECT SINGLE rfbsk FROM vbrk INTO l_rfbsk WHERE vbeln = ls_bil_invoice-hd_gen-bil_number.
+
+        IF l_rfbsk NE 'C' AND l_rfbsk NE 'E'.
+*            MESSAGE 'Factura no contabilizada no se puede imprimir' type 'E'.
+        ENDIF.
+
+        DATA: ls_data_extract            TYPE zidmx_di_ori_in_msg_type,
+              ls_data_extra              TYPE zidmx_di_extra,
+              lt_xvbrk                   TYPE vbrkvb_t,
+              ls_xvbrk                   TYPE vbrkvb,
+              lt_xvbrp                   TYPE vbrpvb_t,
+              lt_xkomv                   TYPE va_komv_t,
+              lt_xvbpa                   TYPE va_vbpavb_t,
+              lv_string_addenda          TYPE string,
+              lv_string_header_compl_xml TYPE string,
+              lt_item_compl_xml          TYPE idmx_di_t_item_complemento,
+              lt_xvbrp_ref               TYPE TABLE OF vbrpvb.
+
+        SELECT SINGLE * INTO ls_xvbrk FROM vbrk
+                          WHERE vbeln = ls_bil_invoice-hd_gen-bil_number.
+        IF sy-subrc EQ 0.
+          SELECT * INTO CORRESPONDING FIELDS OF TABLE lt_xvbrp FROM vbrp
+                                      WHERE vbeln = ls_xvbrk-vbeln.
+          SELECT * INTO CORRESPONDING FIELDS OF TABLE lt_xkomv FROM konv
+                                      WHERE knumv = ls_xvbrk-knumv.
+          SELECT * INTO CORRESPONDING FIELDS OF TABLE lt_xvbpa FROM vbpa
+                                      WHERE vbeln = ls_xvbrk-vbeln.
+
+          CALL FUNCTION 'ZIDMX_DI_SD_DATA_EXTRACT'
+            EXPORTING
+              is_xvbrk                   = ls_xvbrk
+              it_xvbrp                   = lt_xvbrp
+              it_xkomv                   = lt_xkomv
+              it_xvbpa                   = lt_xvbpa
+              iv_text_read_flag          = 'X'
+              iv_text_badi_flag          = 'X'
+            IMPORTING
+              es_data_extract            = ls_data_extract
+              es_data_extra              = ls_data_extra
+              ev_string_addenda          = lv_string_addenda
+              ev_string_header_compl_xml = lv_string_header_compl_xml
+              et_item_compl_xml          = lt_item_compl_xml
+              et_xvbrp_ref               = lt_xvbrp_ref
+*             ev_string_customs          = lv_string_customs
+            EXCEPTIONS
+              error                      = 1
+              OTHERS                     = 2.
+
+          IF sy-subrc <> 0.
+*          EXIT.
+          ENDIF.
+        ENDIF.
+
+*   call smartform invoice
+        CALL FUNCTION lf_fm_name
+          EXPORTING
+            archive_index      = toa_dara
+            archive_parameters = arc_params
+            control_parameters = ls_control_param
+*           mail_appl_obj      =
+            mail_recipient     = ls_recipient
+            mail_sender        = ls_sender
+            output_options     = ls_composer_param
+            user_settings      = space
+            ls_data_extract    = ls_data_extract
+            ls_data_extra      = ls_data_extra
+            is_bil_invoice     = ls_bil_invoice
+            is_nast            = nast
+            is_repeat          = repeat
+            it_factura         = it_factura
+          IMPORTING
+            job_output_info    = ls_job_info
+*           document_output_info =
+*           job_output_options =
+          EXCEPTIONS
+            formatting_error   = 1
+            internal_error     = 2
+            send_error         = 3
+            user_canceled      = 4
+            OTHERS             = 5.
+        IF sy-subrc <> 0.
+*     error handling
+          cf_retcode = sy-subrc.
+          PERFORM protocol_update.
+*   get SmartForm protocoll and store it in the NAST protocoll
+          PERFORM add_smfrm_prot.
+        ELSE.
+*  *******CGC inicio
+          DATA: et_otf         TYPE TABLE OF itcoo WITH HEADER LINE,
+                v_bin_filesize TYPE i,
+                it_otf         TYPE STANDARD TABLE OF itcoo,
+                it_docs        TYPE STANDARD TABLE OF docs,
+                it_lines       TYPE STANDARD TABLE OF tline,
+                tipof(1)       TYPE c.
+
+          ls_control_param-getotf = 'X'.
+
+          CALL FUNCTION lf_fm_name
+            EXPORTING
+              archive_index      = toa_dara
+              archive_parameters = arc_params
+              control_parameters = ls_control_param
+*             mail_appl_obj      =
+              mail_recipient     = ls_recipient
+              mail_sender        = ls_sender
+              output_options     = ls_composer_param
+              user_settings      = space
+              ls_data_extract    = ls_data_extract
+              ls_data_extra      = ls_data_extra
+              is_bil_invoice     = ls_bil_invoice
+              is_nast            = nast
+              is_repeat          = repeat
+              it_factura         = it_factura
+            IMPORTING
+              job_output_info    = ls_job_info
+*             document_output_info =
+*             job_output_options =
+            EXCEPTIONS
+              formatting_error   = 1
+              internal_error     = 2
+              send_error         = 3
+              user_canceled      = 4
+              OTHERS             = 5.
+
+          et_otf[] = ls_job_info-otfdata[].
+
+          CALL FUNCTION 'CONVERT_OTF_2_PDF'
+            IMPORTING
+              bin_filesize           = v_bin_filesize
+            TABLES
+              otf                    = et_otf
+              doctab_archive         = it_docs
+              lines                  = it_lines
+            EXCEPTIONS
+              err_conv_not_possible  = 1
+              err_otf_mc_noendmarker = 2
+              OTHERS                 = 3.
+
+          CLEAR v_filename. CLEAR tipof.
+          IF ls_bil_invoice-hd_gen-bil_type = 'G2'.
+            tipof = 'N'.
+          ELSE.
+            tipof = 'F'.
+          ENDIF.
+
+          v_filename = factura_swo.
+          SHIFT v_filename LEFT DELETING LEADING '0'.
+          CONCATENATE 'C:\Facturas\' tipof v_filename '.pdf' INTO v_filename.
+
+*        CALL FUNCTION 'GUI_DOWNLOAD'
+*          EXPORTING
+*            bin_filesize            = v_bin_filesize
+*            filename                = v_filename
+*            filetype                = 'BIN'
+*          TABLES
+*            data_tab                = it_lines
+*          EXCEPTIONS
+*            file_write_error        = 1
+*            no_batch                = 2
+*            gui_refuse_filetransfer = 3
+*            invalid_type            = 4
+*            no_authority            = 5
+*            unknown_error           = 6
+*            header_not_allowed      = 7
+*            separator_not_allowed   = 8
+*            filesize_not_allowed    = 9
+*            header_too_long         = 10
+*            dp_error_create         = 11
+*            dp_error_send           = 12
+*            dp_error_write          = 13
+*            unknown_dp_error        = 14
+*            access_denied           = 15
+*            dp_out_of_memory        = 16
+*            disk_full               = 17
+*            dp_timeout              = 18
+*            file_not_found          = 19
+*            dataprovider_exception  = 20
+*            control_flush_error     = 21
+*            OTHERS                  = 22.
+*  *********************************************************************
+          DATA: gv_attachment TYPE solix_tab.
+          DATA: e_binfile TYPE xstring.
+
+          CLEAR it_pdf. REFRESH it_pdf.
+
+          CALL FUNCTION 'CONVERT_OTF'
+            EXPORTING
+              format                = 'PDF'
+              max_linewidth         = 132
+            IMPORTING
+              bin_filesize          = v_bin_filesize
+              bin_file              = e_binfile
+            TABLES
+              otf                   = et_otf
+              lines                 = it_lines
+            EXCEPTIONS
+              err_max_linewidth     = 1
+              err_format            = 2
+              err_conv_not_possible = 3
+              OTHERS                = 4.
+
+          gv_attachment = cl_document_bcs=>xstring_to_solix( ip_xstring = e_binfile ).
+          it_pdf[] = gv_attachment[].
+*  ************************************************************CGC fin
+        ENDIF.
+      ENDDO.
+*   get SmartForm spoolid and store it in the NAST protocoll
+      DATA ls_spoolid LIKE LINE OF ls_job_info-spoolids.
+      LOOP AT ls_job_info-spoolids INTO ls_spoolid.
+        IF ls_spoolid NE space.
+          PERFORM protocol_update_spool USING '342' ls_spoolid
+                                              space space space.
+        ENDIF.
+      ENDLOOP.
+      ls_composer_param-tdcopies = nast_anzal.
+      IF NOT nast_tdarmod IS INITIAL.
+        nast-tdarmod = nast_tdarmod.
+        CLEAR nast_tdarmod.
+      ENDIF.
+
+    ENDIF.
+
+*   get SmartForm protocoll and store it in the NAST protocoll
+*   PERFORM ADD_SMFRM_PROT.
+
+  ENDFORM.                    "PROCESSING
+*  ---------------------------------------------------------------------*
+*   PERFORM validar_mes_cerrado_fi
+*   USING
+*     iv_bukrs   TYPE bukrs
+*     iv_budat   TYPE sy-datum
+*     iv_idmsg   TYPE symsgid   " (no se usa para MESSAGE; se mantiene la firma)
+*   CHANGING
+*     cv_errmsg  TYPE string
+*     ev_cerrado TYPE abap_bool
+*  ---------------------------------------------------------------------*
+  FORM validar_mes_cerrado_fi
+    USING    iv_bukrs   TYPE bukrs
+             iv_budat   TYPE sy-datum
+             iv_idmsg   TYPE symsgid
+    CHANGING cv_errmsg  TYPE string
+             ev_cerrado TYPE abap_bool.
+
+    DATA: lv_gjahr TYPE gjahr,
+          lv_poper TYPE poper.   " I_MONAT de FI_PERIOD_CHECK es POPER (NUMC3)
+
+    CLEAR: ev_cerrado, cv_errmsg.
+
+    " Validación mínima de entrada
+    IF iv_bukrs IS INITIAL OR iv_budat IS INITIAL.
+      ev_cerrado = abap_true.
+      cv_errmsg  = |Faltan datos: sociedad o fecha.|.
+      RETURN.
+    ENDIF.
+
+    " Derivar año/período desde la fecha (POPER = 001..012)
+    lv_gjahr = CONV gjahr( iv_budat(4) ).
+    lv_poper = CONV poper( iv_budat+4(2) ).  " '03' -> '003'
+
+    " Validación estándar OB52
+    CALL FUNCTION 'FI_PERIOD_CHECK'
+      EXPORTING
+        i_bukrs      = iv_bukrs
+        i_gjahr      = lv_gjahr
+        i_monat      = lv_poper      " usar POPER (NUMC3)
+        i_koart      = '+'           " validación general (todas las clases)
+      EXCEPTIONS
+        error_period = 1
+        OTHERS       = 2.
+
+    IF sy-subrc = 0.
+      ev_cerrado = abap_false.   " ABIERTO
+      RETURN.
+    ENDIF.
+
+    " CERRADO / no permitido
+    ev_cerrado = abap_true.
+    cv_errmsg  = |Período { lv_poper }/{ lv_gjahr } cerrado o no válido para la sociedad { iv_bukrs }.|.
+
+  ENDFORM.
+
+  "--- Fallback por si no existe en tu include principal
+*  CONSTANTS c_log_objt TYPE symsgid VALUE 'ZCFDI_40'.
+  FORM logs
+    USING
+      return_code TYPE sy-subrc
+      us_screen   TYPE c.                       "#EC CALLED "#EC NEEDED
+
+    DATA: lt_messages  TYPE ty_bapiret2_tab_x,
+          ls_message   TYPE bapiret2,
+          lv_has_error TYPE abap_bool,
+          lv_any_sw    TYPE abap_bool.
+
+    DATA: lv_vbeln TYPE vbrk-vbeln,
+          lv_bukrs TYPE bukrs,
+          lv_gjahr TYPE gjahr,
+          lv_erdat TYPE vbrk-erdat,
+          lv_fkdat TYPE vbrk-fkdat,
+          lv_idmsg TYPE symsgid.
+
+    CLEAR: lv_has_error, lv_any_sw.
+    return_code = 0.
+
+    lv_idmsg = c_log_objt.
+
+    IF nast-vstat IS INITIAL OR nast-vstat = '0'.
+
+      lv_vbeln = nast-objky.
+
+      CLEAR: lv_bukrs, lv_gjahr, lv_erdat, lv_fkdat.
+      SELECT SINGLE bukrs erdat gjahr fkdat
+        INTO (lv_bukrs, lv_erdat, lv_gjahr, lv_fkdat)
+        FROM vbrk
+        WHERE vbeln = lv_vbeln.
+
+      IF lv_gjahr IS INITIAL.
+        IF lv_fkdat IS NOT INITIAL.
+          lv_gjahr = lv_fkdat+0(4).
+        ELSEIF lv_erdat IS NOT INITIAL.
+          lv_gjahr = lv_erdat+0(4).
+        ELSE.
+          lv_gjahr = sy-datum+0(4).
+        ENDIF.
+      ENDIF.
+
+      PERFORM add_xml_log_msgsx_flags
+        USING    lv_bukrs lv_vbeln lv_gjahr lv_idmsg us_screen
+        CHANGING lt_messages lv_has_error lv_any_sw.
+
+    ENDIF.
+
+    " ---- Asegurar al menos 1 mensaje en protocolo (evitar VN052) ----
+    PERFORM ensure_nast_protocol
+      USING    c_log_objt
+      CHANGING lt_messages.
+
+    LOOP AT lt_messages INTO ls_message.
+      CALL FUNCTION 'NAST_PROTOCOL_UPDATE'
+        EXPORTING
+          msg_arbgb = ls_message-id
+          msg_nr    = ls_message-number
+          msg_ty    = ls_message-type
+          msg_v1    = ls_message-message_v1
+          msg_v2    = ls_message-message_v2
+          msg_v3    = ls_message-message_v3
+          msg_v4    = ls_message-message_v4
+        EXCEPTIONS
+          OTHERS    = 1.
+
+      IF ls_message-type = 'E'.
+        lv_has_error = abap_true.
+      ELSE.
+        lv_any_sw = abap_true.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_has_error = abap_true.
+      return_code = 1.
+    ELSE.
+      return_code = 0.
+      us_screen = 'X'.
+    ENDIF.
+
+  ENDFORM.
+
+  FORM anexa_xml USING factura descripcion.
+
+    DATA: p_type           TYPE swo_objtyp,
+          p_key            TYPE swo_typeid,
+          p_file           TYPE c LENGTH 100,
+          p_desc           TYPE so_obj_des,
+          fvbeln           TYPE vbeln,
+          descripcion2(50).
+
+
+    DATA: ls_fol_id   TYPE soodk,
+          ls_obj_id   TYPE soodk,
+          ls_obj_data TYPE sood1,
+          ls_folmem_k TYPE sofmk,
+          ls_note     TYPE borident,
+          ls_object   TYPE borident,
+          lv_ep_note  TYPE borident-objkey,
+          lv_offset   TYPE i.
+
+    DATA: it_objhead  TYPE STANDARD TABLE OF soli,
+          it_content  LIKE STANDARD TABLE OF soli,
+          it_cpntent2 TYPE STANDARD TABLE OF solix,
+          wa_content  LIKE soli.
+
+    p_type   = 'VBRK'.
+    p_key    = factura.
+    p_file   = 'Hola.xml'. "ARCHIVO.
+    CONCATENATE descripcion 'XML' INTO descripcion2 SEPARATED BY space.
+    p_desc   = descripcion2.
+
+    p_desc = |CFDI_{ factura }_Timbrado.xml|.
+
+    ls_object-objkey   = p_key.
+    ls_object-objtype  = p_type.
+
+
+*  CALL FUNCTION 'ZDELETE_ANEXO_XML'
+*    EXPORTING
+*      FACTURA     = FACTURA
+*    EXCEPTIONS
+*      FACTURA_INVALIDA.
+
+* Para desencriptar el XML
+    DATA: t_xml       TYPE zcfdi_40_xml OCCURS 0 WITH HEADER LINE,
+          cadtemp     TYPE string,
+          string1     TYPE string,
+          return      TYPE bapireturn,
+          bin_file    TYPE xstring,
+          t_datatab   TYPE solix_tab,
+          binfilesize TYPE i.
+
+    CLEAR t_xml.
+    SELECT SINGLE * FROM zcfdi_40_xml INTO t_xml WHERE factura = factura.
+    IF sy-subrc = '0'.
+*    cadTemp = t_xml-xml(t_xml-longitud).
+*
+*    CALL FUNCTION 'ZSD_DECRYP_XML'
+*      EXPORTING
+*        i_vbeln         = fvbeln
+*        i_cadena        = cadTemp
+*      IMPORTING
+*        e_cadena_decryp = string1
+*        bin_file        = bin_file
+*        return          = return
+*        e_xml_tab       = t_dataTab
+*        e_fileSize      = binFileSize.
+    ELSE.
+      MESSAGE 'Error anexando XML.' TYPE 'E'.
+    ENDIF.
+
+
+    DATA: string2 TYPE string,
+          conv    TYPE REF TO cl_abap_conv_in_ce.
+
+
+    conv = cl_abap_conv_in_ce=>create( encoding  = 'UTF-8'
+    endian =      'L'
+    input = bin_file ).
+    conv->read( IMPORTING data = string2 ).
+
+    CALL FUNCTION 'SO_STRING_TO_TAB'
+      EXPORTING
+        content_str = t_xml-xml "string2
+      TABLES
+        content_tab = it_content[].
+
+
+    CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET'
+      EXPORTING
+        region    = 'B'
+      IMPORTING
+        folder_id = ls_fol_id
+      EXCEPTIONS
+        OTHERS    = 1.
+
+    ls_obj_data-objsns     = 'O'.
+    ls_obj_data-objla      = sy-langu.
+    ls_obj_data-objdes     = p_desc.
+    lv_offset              = strlen( p_file ) - 3.
+    ls_obj_data-file_ext   = p_file+lv_offset(3).
+*{   REPLACE        ABLK901110                                        1
+*\  ls_obj_data-objlen     = LINES( it_content ) * 255.
+    ls_obj_data-objlen     = lines( it_content ) * 510.
+*}   REPLACE
+
+    CALL FUNCTION 'SO_OBJECT_INSERT'
+      EXPORTING
+        folder_id             = ls_fol_id
+        object_type           = 'RAW' "'EXT'  " 'BIN'
+        object_hd_change      = ls_obj_data
+      IMPORTING
+        object_id             = ls_obj_id
+      TABLES
+        objhead               = it_objhead
+        objcont               = it_content
+      EXCEPTIONS
+        active_user_not_exist = 35
+        folder_not_exist      = 6
+        object_type_not_exist = 17
+        owner_not_exist       = 22
+        parameter_error       = 23
+        OTHERS                = 1000.
+
+    IF sy-subrc = 0 AND ls_object-objkey IS NOT INITIAL.
+      ls_folmem_k-foltp = ls_fol_id-objtp.
+      ls_folmem_k-folyr = ls_fol_id-objyr.
+      ls_folmem_k-folno = ls_fol_id-objno.
+      ls_folmem_k-doctp = ls_obj_id-objtp.
+      ls_folmem_k-docyr = ls_obj_id-objyr.
+      ls_folmem_k-docno = ls_obj_id-objno.
+      lv_ep_note = ls_folmem_k.
+      ls_note-objtype = 'MESSAGE'.
+      ls_note-objkey = lv_ep_note.
+
+      CALL FUNCTION 'BINARY_RELATION_CREATE'   " _COMMIT'
+        EXPORTING
+          obj_rolea    = ls_object
+          obj_roleb    = ls_note
+          relationtype = 'ATTA'
+        EXCEPTIONS
+          OTHERS       = 1.
+    ELSE.
+      MESSAGE 'Error anexando XML.' TYPE 'E'.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+*    COMMIT WORK.
+      MESSAGE 'Archivo anexado exitosamente.' TYPE 'S'.
+    ELSE.
+      MESSAGE 'Error anexando XML.' TYPE 'E'.
+    ENDIF.
+
+  ENDFORM.                    "ANEXA_XML
+  FORM anexa_xml_request USING factura descripcion.
+
+    DATA: p_type           TYPE swo_objtyp,
+          p_key            TYPE swo_typeid,
+          p_file           TYPE c LENGTH 100,
+          p_desc           TYPE so_obj_des,
+          fvbeln           TYPE vbeln,
+          descripcion2(50).
+
+
+    DATA: ls_fol_id   TYPE soodk,
+          ls_obj_id   TYPE soodk,
+          ls_obj_data TYPE sood1,
+          ls_folmem_k TYPE sofmk,
+          ls_note     TYPE borident,
+          ls_object   TYPE borident,
+          lv_ep_note  TYPE borident-objkey,
+          lv_offset   TYPE i.
+
+    DATA: it_objhead  TYPE STANDARD TABLE OF soli,
+          it_content  LIKE STANDARD TABLE OF soli,
+          it_cpntent2 TYPE STANDARD TABLE OF solix,
+          wa_content  LIKE soli.
+
+    p_type   = 'VBRK'.
+    p_key    = factura.
+    p_file   = 'Hola.xml'. "ARCHIVO.
+    CONCATENATE descripcion 'XML' INTO descripcion2 SEPARATED BY space.
+    p_desc   = descripcion2.
+
+    p_desc = |CFDI_{ factura }_Request.xml|.
+
+    ls_object-objkey   = p_key.
+    ls_object-objtype  = p_type.
+
+
+
+* Para desencriptar el XML
+    DATA: t_xml       TYPE zcfdi_40_xml OCCURS 0 WITH HEADER LINE,
+          cadtemp     TYPE string,
+          string1     TYPE string,
+          return      TYPE bapireturn,
+          bin_file    TYPE xstring,
+          t_datatab   TYPE solix_tab,
+          binfilesize TYPE i.
+
+    CLEAR t_xml.
+    SELECT SINGLE * FROM zcfdi_40_xml INTO t_xml WHERE factura = factura.
+    IF sy-subrc = '0'.
+*                  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+*                    EXPORTING
+*                      text     = lv_xml_req
+*                      encoding = lv_enc
+*                    IMPORTING
+*                      buffer   = lv_xreq.
+*
+*                  CLEAR ls_log.
+*                  ls_log-bukrs      = wa_head-bukrs.
+*                  ls_log-belnr      = wa_head-belnr.
+*                  ls_log-gjahr      = wa_head-gjahr.
+*                  ls_log-tipo_doc   = 'RQ'.
+*                  ls_log-created_on = sy-datum.
+*                  ls_log-created_at = sy-uzeit.
+*                  ls_log-xml_req    = lv_xreq.
+*                  MODIFY zcfdi_xml_log FROM ls_log.
+
+    ELSE.
+      MESSAGE 'Error anexando XML.' TYPE 'W'.
+    ENDIF.
+
+
+    DATA: string2 TYPE string,
+          conv    TYPE REF TO cl_abap_conv_in_ce.
+
+
+    conv = cl_abap_conv_in_ce=>create( encoding  = 'UTF-8'
+    endian =      'L'
+    input = bin_file ).
+    conv->read( IMPORTING data = string2 ).
+
+    CALL FUNCTION 'SO_STRING_TO_TAB'
+      EXPORTING
+        content_str = t_xml-xml_request "string2
+      TABLES
+        content_tab = it_content[].
+
+
+    CALL FUNCTION 'SO_FOLDER_ROOT_ID_GET'
+      EXPORTING
+        region    = 'B'
+      IMPORTING
+        folder_id = ls_fol_id
+      EXCEPTIONS
+        OTHERS    = 1.
+
+    ls_obj_data-objsns     = 'O'.
+    ls_obj_data-objla      = sy-langu.
+    ls_obj_data-objdes     = p_desc.
+    lv_offset              = strlen( p_file ) - 3.
+    ls_obj_data-file_ext   = p_file+lv_offset(3).
+*{   REPLACE        ABLK901110                                        1
+*\  ls_obj_data-objlen     = LINES( it_content ) * 255.
+    ls_obj_data-objlen     = lines( it_content ) * 510.
+*}   REPLACE
+
+    CALL FUNCTION 'SO_OBJECT_INSERT'
+      EXPORTING
+        folder_id             = ls_fol_id
+        object_type           = 'RAW' "'EXT'  " 'BIN'
+        object_hd_change      = ls_obj_data
+      IMPORTING
+        object_id             = ls_obj_id
+      TABLES
+        objhead               = it_objhead
+        objcont               = it_content
+      EXCEPTIONS
+        active_user_not_exist = 35
+        folder_not_exist      = 6
+        object_type_not_exist = 17
+        owner_not_exist       = 22
+        parameter_error       = 23
+        OTHERS                = 1000.
+
+    IF sy-subrc = 0 AND ls_object-objkey IS NOT INITIAL.
+      ls_folmem_k-foltp = ls_fol_id-objtp.
+      ls_folmem_k-folyr = ls_fol_id-objyr.
+      ls_folmem_k-folno = ls_fol_id-objno.
+      ls_folmem_k-doctp = ls_obj_id-objtp.
+      ls_folmem_k-docyr = ls_obj_id-objyr.
+      ls_folmem_k-docno = ls_obj_id-objno.
+      lv_ep_note = ls_folmem_k.
+      ls_note-objtype = 'MESSAGE'.
+      ls_note-objkey = lv_ep_note.
+
+      CALL FUNCTION 'BINARY_RELATION_CREATE'   " _COMMIT'
+        EXPORTING
+          obj_rolea    = ls_object
+          obj_roleb    = ls_note
+          relationtype = 'ATTA'
+        EXCEPTIONS
+          OTHERS       = 1.
+    ELSE.
+      MESSAGE 'Error anexando XML.' TYPE 'W'.
+      RETURN.
+    ENDIF.
+
+    IF sy-subrc = 0.
+*    COMMIT WORK.
+      MESSAGE 'Archivo anexado exitosamente.' TYPE 'S'.
+    ELSE.
+      MESSAGE 'Error anexando XML.' TYPE 'W'.
+    ENDIF.
+
+  ENDFORM.                    "ANEXA_XML
